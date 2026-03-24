@@ -16,41 +16,57 @@
     },
     "metrics": [
         {
-            "name": "request_latency",
-            "type": "histogram",
-            "tags": [
-                { "tag": "endpoint" },
-                { "tag": "status" }
-            ],
-            "description": "HTTP request latency in seconds"
-        },
-        {
-            "name": "request_count",
-            "type": "count",
-            "tags": [
-                { "tag": "endpoint" },
-                { "tag": "status" }
-            ],
-            "description": "Total number of HTTP requests"
-        },
-        {
-            "name": "active_connections",
+            "name": "uptime",
             "type": "gauge",
-            "tags": [
-                { "tag": "endpoint" },
-                { "tag": "region", "optional": true }
-            ],
-            "description": "Current number of active connections"
-        },
-        {
-            "name": "resolver_latency",
-            "type": "histogram",
-            "tags": [
-                { "tag": "endpoint" },
-                { "tag": "status", "export_name": "resolver_status" },
-                { "tag": "endpoint", "export_name": "resolver_fqn", "optional": true }
-            ],
-            "description": "Resolver execution latency in seconds"
+            "tags": [],
+            "description": "Process uptime in seconds"
         }
-    ]
+    ],
+    "namespaces": {
+        "http": {
+            "metrics": [
+                {
+                    "name": "request_latency",
+                    "type": "histogram",
+                    "tags": [
+                        { "tag": "endpoint" },
+                        { "tag": "status" }
+                    ],
+                    "description": "HTTP request latency in seconds"
+                },
+                {
+                    "name": "request_count",
+                    "type": "count",
+                    "tags": [
+                        { "tag": "endpoint" },
+                        { "tag": "status" }
+                    ],
+                    "description": "Total number of HTTP requests"
+                },
+                {
+                    "name": "active_connections",
+                    "type": "gauge",
+                    "tags": [
+                        { "tag": "endpoint" },
+                        { "tag": "region", "optional": true }
+                    ],
+                    "description": "Current number of active connections"
+                }
+            ]
+        },
+        "resolver": {
+            "metrics": [
+                {
+                    "name": "latency",
+                    "type": "histogram",
+                    "tags": [
+                        { "tag": "endpoint" },
+                        { "tag": "status", "export_name": "resolver_status" },
+                        { "tag": "endpoint", "export_name": "resolver_fqn", "optional": true }
+                    ],
+                    "description": "Resolver execution latency in seconds"
+                }
+            ]
+        }
+    }
 }

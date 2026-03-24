@@ -86,6 +86,17 @@ fn to_pascal_case(s: &str) -> String {
         .collect()
 }
 
+/// Build a PascalCase variant name from namespace path + metric name.
+/// e.g., ["http", "auth"] + "login_latency" -> "HttpAuthLoginLatency"
+fn variant_name(namespace: &[String], metric_name: &str) -> String {
+    let mut name = String::new();
+    for ns in namespace {
+        name.push_str(&to_pascal_case(ns));
+    }
+    name.push_str(&to_pascal_case(metric_name));
+    name
+}
+
 fn generate_code(schema: &MetricsSchema) -> String {
     let mut out = String::with_capacity(4096);
 
@@ -115,7 +126,6 @@ fn generate_metric_type_reexport(out: &mut String) {
 }
 
 fn generate_tag_types(out: &mut String, schema: &MetricsSchema) {
-    // Sort tags by name for deterministic output
     let mut tag_names: Vec<&String> = schema.tags.keys().collect();
     tag_names.sort();
 
@@ -126,99 +136,57 @@ fn generate_tag_types(out: &mut String, schema: &MetricsSchema) {
         match tag_def.value_type {
             TagValueType::Enum => {
                 let values = tag_def.values.as_ref().unwrap();
-                writeln!(
-                    out,
-                    "/// Tag values for `{tag_name}` (exported as `{}`).",
-                    tag_def.export_name
-                )
-                .unwrap();
-                writeln!(
-                    out,
-                    "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]"
-                )
-                .unwrap();
+                writeln!(out, "/// Tag values for `{tag_name}` (exported as `{}`).", tag_def.export_name).unwrap();
+                writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]").unwrap();
                 writeln!(out, "pub enum {type_name} {{").unwrap();
                 for value in values {
-                    let variant = to_pascal_case(value);
-                    writeln!(out, "    {variant},").unwrap();
+                    writeln!(out, "    {},", to_pascal_case(value)).unwrap();
                 }
                 writeln!(out, "}}").unwrap();
                 writeln!(out).unwrap();
 
-                // as_str()
                 writeln!(out, "impl {type_name} {{").unwrap();
-                writeln!(
-                    out,
-                    "    /// Returns the string representation of this tag value."
-                )
-                .unwrap();
+                writeln!(out, "    /// Returns the string representation of this tag value.").unwrap();
                 writeln!(out, "    pub fn as_str(&self) -> &'static str {{").unwrap();
                 writeln!(out, "        match self {{").unwrap();
                 for value in values {
-                    let variant = to_pascal_case(value);
-                    writeln!(out, "            {type_name}::{variant} => \"{value}\",").unwrap();
+                    writeln!(out, "            {type_name}::{} => \"{value}\",", to_pascal_case(value)).unwrap();
                 }
                 writeln!(out, "        }}").unwrap();
                 writeln!(out, "    }}").unwrap();
                 writeln!(out, "}}").unwrap();
                 writeln!(out).unwrap();
 
-                // Display
                 writeln!(out, "impl fmt::Display for {type_name} {{").unwrap();
-                writeln!(
-                    out,
-                    "    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {{"
-                )
-                .unwrap();
+                writeln!(out, "    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {{").unwrap();
                 writeln!(out, "        f.write_str(self.as_str())").unwrap();
                 writeln!(out, "    }}").unwrap();
                 writeln!(out, "}}").unwrap();
                 writeln!(out).unwrap();
             }
             TagValueType::String => {
-                writeln!(
-                    out,
-                    "/// Tag values for `{tag_name}` (exported as `{}`). Accepts arbitrary strings.",
-                    tag_def.export_name
-                )
-                .unwrap();
+                writeln!(out, "/// Tag values for `{tag_name}` (exported as `{}`). Accepts arbitrary strings.", tag_def.export_name).unwrap();
                 writeln!(out, "#[derive(Debug, Clone, PartialEq, Eq, Hash)]").unwrap();
                 writeln!(out, "pub struct {type_name}(pub String);").unwrap();
                 writeln!(out).unwrap();
 
-                // as_str()
                 writeln!(out, "impl {type_name} {{").unwrap();
-                writeln!(out, "    pub fn as_str(&self) -> &str {{").unwrap();
-                writeln!(out, "        &self.0").unwrap();
-                writeln!(out, "    }}").unwrap();
+                writeln!(out, "    pub fn as_str(&self) -> &str {{ &self.0 }}").unwrap();
                 writeln!(out, "}}").unwrap();
                 writeln!(out).unwrap();
 
-                // Display
                 writeln!(out, "impl fmt::Display for {type_name} {{").unwrap();
-                writeln!(
-                    out,
-                    "    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {{"
-                )
-                .unwrap();
-                writeln!(out, "        f.write_str(&self.0)").unwrap();
-                writeln!(out, "    }}").unwrap();
+                writeln!(out, "    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {{ f.write_str(&self.0) }}").unwrap();
                 writeln!(out, "}}").unwrap();
                 writeln!(out).unwrap();
 
-                // From<&str>
                 writeln!(out, "impl From<&str> for {type_name} {{").unwrap();
-                writeln!(out, "    fn from(s: &str) -> Self {{").unwrap();
-                writeln!(out, "        {type_name}(s.to_owned())").unwrap();
-                writeln!(out, "    }}").unwrap();
+                writeln!(out, "    fn from(s: &str) -> Self {{ {type_name}(s.to_owned()) }}").unwrap();
                 writeln!(out, "}}").unwrap();
                 writeln!(out).unwrap();
 
-                // From<String>
                 writeln!(out, "impl From<String> for {type_name} {{").unwrap();
-                writeln!(out, "    fn from(s: String) -> Self {{").unwrap();
-                writeln!(out, "        {type_name}(s)").unwrap();
-                writeln!(out, "    }}").unwrap();
+                writeln!(out, "    fn from(s: String) -> Self {{ {type_name}(s) }}").unwrap();
                 writeln!(out, "}}").unwrap();
                 writeln!(out).unwrap();
             }
@@ -227,36 +195,46 @@ fn generate_tag_types(out: &mut String, schema: &MetricsSchema) {
 }
 
 fn generate_metric_id(out: &mut String, schema: &MetricsSchema) {
+    let flat = schema.flatten_metrics();
+
     writeln!(out, "/// Identifies a metric defined in the schema.").unwrap();
     writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]").unwrap();
     writeln!(out, "#[repr(u16)]").unwrap();
     writeln!(out, "pub enum MetricId {{").unwrap();
-    for (i, metric) in schema.metrics.iter().enumerate() {
-        let variant = to_pascal_case(&metric.name);
-        writeln!(out, "    /// {}", metric.description).unwrap();
-        writeln!(out, "    {variant} = {i},").unwrap();
+    for (i, fm) in flat.iter().enumerate() {
+        let vname = variant_name(&fm.namespace, &fm.metric.name);
+        writeln!(out, "    /// {}", fm.metric.description).unwrap();
+        writeln!(out, "    {vname} = {i},").unwrap();
     }
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
     writeln!(out, "impl MetricId {{").unwrap();
 
-    // name()
-    writeln!(
-        out,
-        "    /// Returns the metric name as defined in the schema."
-    )
-    .unwrap();
+    // name() — returns just the metric name, not namespace-prefixed
+    writeln!(out, "    /// Returns the metric name as defined in the schema (without namespace).").unwrap();
     writeln!(out, "    pub fn name(&self) -> &'static str {{").unwrap();
     writeln!(out, "        match self {{").unwrap();
-    for metric in &schema.metrics {
-        let variant = to_pascal_case(&metric.name);
-        writeln!(
-            out,
-            "            MetricId::{variant} => \"{}\",",
-            metric.name
-        )
-        .unwrap();
+    for fm in &flat {
+        let vname = variant_name(&fm.namespace, &fm.metric.name);
+        writeln!(out, "            MetricId::{vname} => \"{}\",", fm.metric.name).unwrap();
+    }
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    // namespace() — returns the namespace segments as a static slice
+    writeln!(out, "    /// Returns the namespace path for this metric as a static slice of segments.").unwrap();
+    writeln!(out, "    pub fn namespace(&self) -> &'static [&'static str] {{").unwrap();
+    writeln!(out, "        match self {{").unwrap();
+    for fm in &flat {
+        let vname = variant_name(&fm.namespace, &fm.metric.name);
+        if fm.namespace.is_empty() {
+            writeln!(out, "            MetricId::{vname} => &[],").unwrap();
+        } else {
+            let segments: Vec<String> = fm.namespace.iter().map(|s| format!("\"{s}\"")).collect();
+            writeln!(out, "            MetricId::{vname} => &[{}],", segments.join(", ")).unwrap();
+        }
     }
     writeln!(out, "        }}").unwrap();
     writeln!(out, "    }}").unwrap();
@@ -266,14 +244,14 @@ fn generate_metric_id(out: &mut String, schema: &MetricsSchema) {
     writeln!(out, "    /// Returns the aggregation type for this metric.").unwrap();
     writeln!(out, "    pub fn metric_type(&self) -> MetricType {{").unwrap();
     writeln!(out, "        match self {{").unwrap();
-    for metric in &schema.metrics {
-        let variant = to_pascal_case(&metric.name);
-        let mt = match metric.metric_type {
+    for fm in &flat {
+        let vname = variant_name(&fm.namespace, &fm.metric.name);
+        let mt = match fm.metric.metric_type {
             MetricType::Count => "MetricType::Count",
             MetricType::Gauge => "MetricType::Gauge",
             MetricType::Histogram => "MetricType::Histogram",
         };
-        writeln!(out, "            MetricId::{variant} => {mt},").unwrap();
+        writeln!(out, "            MetricId::{vname} => {mt},").unwrap();
     }
     writeln!(out, "        }}").unwrap();
     writeln!(out, "    }}").unwrap();
@@ -283,11 +261,10 @@ fn generate_metric_id(out: &mut String, schema: &MetricsSchema) {
     writeln!(out, "    /// Returns the human-readable description of this metric.").unwrap();
     writeln!(out, "    pub fn description(&self) -> &'static str {{").unwrap();
     writeln!(out, "        match self {{").unwrap();
-    for metric in &schema.metrics {
-        let variant = to_pascal_case(&metric.name);
-        // Escape any quotes in the description
-        let desc = metric.description.replace('"', "\\\"");
-        writeln!(out, "            MetricId::{variant} => \"{desc}\",").unwrap();
+    for fm in &flat {
+        let vname = variant_name(&fm.namespace, &fm.metric.name);
+        let desc = fm.metric.description.replace('"', "\\\"");
+        writeln!(out, "            MetricId::{vname} => \"{desc}\",").unwrap();
     }
     writeln!(out, "        }}").unwrap();
     writeln!(out, "    }}").unwrap();
@@ -295,53 +272,45 @@ fn generate_metric_id(out: &mut String, schema: &MetricsSchema) {
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
-    // Display for MetricId
+    // Display
     writeln!(out, "impl fmt::Display for MetricId {{").unwrap();
-    writeln!(
-        out,
-        "    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {{"
-    )
-    .unwrap();
+    writeln!(out, "    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {{").unwrap();
     writeln!(out, "        f.write_str(self.name())").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
-    // ALL_METRICS constant
-    writeln!(
-        out,
-        "/// All metric IDs defined in the schema, in definition order."
-    )
-    .unwrap();
+    // ALL_METRICS
+    writeln!(out, "/// All metric IDs defined in the schema, in definition order.").unwrap();
     writeln!(
         out,
         "pub const ALL_METRICS: &[MetricId] = &[{}];",
-        schema
-            .metrics
-            .iter()
-            .map(|m| format!("MetricId::{}", to_pascal_case(&m.name)))
+        flat.iter()
+            .map(|fm| format!("MetricId::{}", variant_name(&fm.namespace, &fm.metric.name)))
             .collect::<Vec<_>>()
             .join(", ")
-    )
-    .unwrap();
+    ).unwrap();
     writeln!(out).unwrap();
 }
 
 fn generate_metric_tags_structs(out: &mut String, schema: &MetricsSchema) {
-    for metric in &schema.metrics {
-        let struct_name = format!("{}Tags", to_pascal_case(&metric.name));
+    let flat = schema.flatten_metrics();
 
-        writeln!(
-            out,
-            "/// Tag set for the `{}` metric.",
-            metric.name
-        )
-        .unwrap();
+    for fm in &flat {
+        let vname = variant_name(&fm.namespace, &fm.metric.name);
+        let struct_name = format!("{vname}Tags");
+
+        let qualified = if fm.namespace.is_empty() {
+            fm.metric.name.clone()
+        } else {
+            format!("{}::{}", fm.namespace.join("::"), fm.metric.name)
+        };
+
+        writeln!(out, "/// Tag set for the `{qualified}` metric.").unwrap();
         writeln!(out, "#[derive(Debug, Clone, PartialEq, Eq)]").unwrap();
         writeln!(out, "pub struct {struct_name} {{").unwrap();
 
-        for tag_ref in &metric.tags {
-            let tag_def = &schema.tags[&tag_ref.tag];
+        for tag_ref in &fm.metric.tags {
             let field_name = tag_ref
                 .export_name
                 .as_ref()
@@ -354,20 +323,19 @@ fn generate_metric_tags_structs(out: &mut String, schema: &MetricsSchema) {
             } else {
                 writeln!(out, "    pub {field_name}: {type_name},").unwrap();
             }
-            let _ = tag_def; // used for type resolution
         }
 
         writeln!(out, "}}").unwrap();
         writeln!(out).unwrap();
 
-        // Manual Hash impl (must match the Eq impl)
+        // Hash impl
         writeln!(out, "impl Hash for {struct_name} {{").unwrap();
-        writeln!(
-            out,
-            "    fn hash<H: Hasher>(&self, state: &mut H) {{"
-        )
-        .unwrap();
-        for tag_ref in &metric.tags {
+        if fm.metric.tags.is_empty() {
+            writeln!(out, "    fn hash<H: Hasher>(&self, _state: &mut H) {{").unwrap();
+        } else {
+            writeln!(out, "    fn hash<H: Hasher>(&self, state: &mut H) {{").unwrap();
+        }
+        for tag_ref in &fm.metric.tags {
             let field_name = tag_ref
                 .export_name
                 .as_ref()
@@ -379,18 +347,20 @@ fn generate_metric_tags_structs(out: &mut String, schema: &MetricsSchema) {
         writeln!(out, "}}").unwrap();
         writeln!(out).unwrap();
 
-        // export_pairs() method
+        // export_pairs()
         writeln!(out, "impl {struct_name} {{").unwrap();
         writeln!(out, "    /// Returns `(export_name, value)` pairs for all set tags.").unwrap();
-        writeln!(out, "    /// Respects per-metric export name overrides.").unwrap();
-        writeln!(
-            out,
-            "    pub fn export_pairs(&self) -> Vec<(&'static str, String)> {{"
-        )
-        .unwrap();
+        writeln!(out, "    pub fn export_pairs(&self) -> Vec<(&'static str, String)> {{").unwrap();
+        if fm.metric.tags.is_empty() {
+            writeln!(out, "        Vec::new()").unwrap();
+            writeln!(out, "    }}").unwrap();
+            writeln!(out, "}}").unwrap();
+            writeln!(out).unwrap();
+            continue;
+        }
         writeln!(out, "        let mut pairs = Vec::new();").unwrap();
 
-        for tag_ref in &metric.tags {
+        for tag_ref in &fm.metric.tags {
             let tag_def = &schema.tags[&tag_ref.tag];
             let export_name = tag_ref
                 .export_name
@@ -403,23 +373,11 @@ fn generate_metric_tags_structs(out: &mut String, schema: &MetricsSchema) {
                 .unwrap_or_else(|| to_snake_case(&tag_ref.tag));
 
             if tag_ref.optional {
-                writeln!(
-                    out,
-                    "        if let Some(ref v) = self.{field_name} {{"
-                )
-                .unwrap();
-                writeln!(
-                    out,
-                    "            pairs.push((\"{export_name}\", v.to_string()));"
-                )
-                .unwrap();
+                writeln!(out, "        if let Some(ref v) = self.{field_name} {{").unwrap();
+                writeln!(out, "            pairs.push((\"{export_name}\", v.to_string()));").unwrap();
                 writeln!(out, "        }}").unwrap();
             } else {
-                writeln!(
-                    out,
-                    "        pairs.push((\"{export_name}\", self.{field_name}.to_string()));"
-                )
-                .unwrap();
+                writeln!(out, "        pairs.push((\"{export_name}\", self.{field_name}.to_string()));").unwrap();
             }
         }
 
@@ -431,7 +389,6 @@ fn generate_metric_tags_structs(out: &mut String, schema: &MetricsSchema) {
 }
 
 fn to_snake_case(s: &str) -> String {
-    // Already snake_case in our schema, but handle PascalCase just in case
     let mut result = String::with_capacity(s.len());
     for (i, ch) in s.chars().enumerate() {
         if ch.is_uppercase() && i > 0 {

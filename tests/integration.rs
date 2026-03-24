@@ -8,7 +8,6 @@ use chalk_metrics::generated::*;
 
 use parking_lot::Mutex;
 
-/// Collects all flushed metrics for inspection.
 struct CollectingExporter {
     collected: Arc<Mutex<Vec<Vec<FlushedMetric>>>>,
 }
@@ -16,10 +15,10 @@ struct CollectingExporter {
 #[async_trait::async_trait]
 impl Exporter for CollectingExporter {
     async fn export(&self, metrics: &[FlushedMetric]) -> Result<(), ExportError> {
-        // We need to clone the metrics since they contain Arcs
         let batch: Vec<FlushedMetric> = metrics
             .iter()
             .map(|m| FlushedMetric {
+                namespace: m.namespace,
                 metric_name: m.metric_name,
                 tags: Arc::clone(&m.tags),
                 value: match &m.value {
@@ -38,45 +37,45 @@ impl Exporter for CollectingExporter {
 fn test_full_pipeline_with_prometheus() {
     let prom = PrometheusExporter::builder().namespace("test").build();
 
-    // Use a long flush interval so we control the flush manually
     let local = client::builder()
         .flush_interval(Duration::from_secs(60))
         .build_local();
 
-    // Record metrics
     local.record_count(
-        MetricId::RequestCount as u16,
+        MetricId::HttpRequestCount as u16,
         "request_count",
+        &["http"],
         0,
         || vec![("endpoint", "/api".into()), ("status", "success".into())],
         10,
     );
 
     local.record_gauge(
-        MetricId::ActiveConnections as u16,
+        MetricId::HttpActiveConnections as u16,
         "active_connections",
+        &["http"],
         1,
         || vec![("endpoint", "/api".into())],
         42.0,
     );
 
     local.record_histogram(
-        MetricId::RequestLatency as u16,
+        MetricId::HttpRequestLatency as u16,
         "request_latency",
+        &["http"],
         2,
         || vec![("endpoint", "/api".into()), ("status", "success".into())],
         0.5,
     );
 
-    // Manual flush + render through Prometheus exporter
     let flushed = local.flush();
-    assert_eq!(flushed.len(), 3, "expected 3 metrics, got {}", flushed.len());
+    assert_eq!(flushed.len(), 3);
 
     let text = prom.render_metrics(&flushed);
-    assert!(text.contains("test_request_count_total"), "text: {text}");
-    assert!(text.contains("test_active_connections"), "text: {text}");
-    assert!(text.contains("test_request_latency_bucket"), "text: {text}");
-    assert!(text.contains("test_request_latency_count"), "text: {text}");
+    // With exporter namespace "test" + metric namespace "http" + metric name
+    assert!(text.contains("test_http_request_count_total"), "text: {text}");
+    assert!(text.contains("test_http_active_connections"), "text: {text}");
+    assert!(text.contains("test_http_request_latency_bucket"), "text: {text}");
 
     local.shutdown();
 }
@@ -95,11 +94,10 @@ fn test_multiple_exporters() {
         .flush_interval(Duration::from_millis(50))
         .build_local();
 
-    local.record_count(0, "test", 0, || vec![], 1);
+    local.record_count(0, "test", &[], 0, || vec![], 1);
 
     std::thread::sleep(Duration::from_millis(150));
 
-    // Collecting exporter should have received at least one batch
     assert!(
         !collected.lock().is_empty(),
         "collecting exporter should have been called"
@@ -112,7 +110,7 @@ fn test_multiple_exporters() {
 fn test_high_throughput() {
     let local = Arc::new(
         client::builder()
-            .flush_interval(Duration::from_secs(60)) // don't flush during test
+            .flush_interval(Duration::from_secs(60))
             .build_local(),
     );
 
@@ -124,7 +122,8 @@ fn test_high_throughput() {
                     local.record_count(
                         0,
                         "throughput_test",
-                        thread_id, // different hash per thread = different stripe
+                        &[],
+                        thread_id,
                         || vec![("tid", format!("{thread_id}"))],
                         1,
                     );
@@ -147,7 +146,6 @@ fn test_high_throughput() {
         .sum();
 
     assert_eq!(total, 80_000);
-
     local.shutdown();
 }
 
@@ -157,9 +155,8 @@ fn test_histogram_quantile_accuracy() {
         .flush_interval(Duration::from_secs(60))
         .build_local();
 
-    // Record a uniform distribution from 1 to 1000
     for i in 1..=1000 {
-        local.record_histogram(0, "accuracy_test", 0, || vec![], i as f64);
+        local.record_histogram(0, "accuracy_test", &[], 0, || vec![], i as f64);
     }
 
     let flushed = local.flush();
@@ -168,21 +165,34 @@ fn test_histogram_quantile_accuracy() {
     match &flushed[0].value {
         FlushedValue::Histogram(sketch) => {
             assert_eq!(sketch.count(), 1000);
-
             let p50 = sketch.estimate_quantile(0.5);
-            assert!(
-                (p50 - 500.0).abs() / 500.0 < 0.05,
-                "p50 = {p50}, expected ~500"
-            );
-
+            assert!((p50 - 500.0).abs() / 500.0 < 0.05, "p50 = {p50}");
             let p99 = sketch.estimate_quantile(0.99);
-            assert!(
-                (p99 - 990.0).abs() / 990.0 < 0.05,
-                "p99 = {p99}, expected ~990"
-            );
+            assert!((p99 - 990.0).abs() / 990.0 < 0.05, "p99 = {p99}");
         }
         _ => panic!("expected histogram"),
     }
+
+    local.shutdown();
+}
+
+#[test]
+fn test_namespace_in_flushed_metrics() {
+    let local = client::builder()
+        .flush_interval(Duration::from_secs(60))
+        .build_local();
+
+    local.record_count(0, "request_count", &["http"], 0, || vec![], 1);
+    local.record_gauge(1, "uptime", &[], 1, || vec![], 99.9);
+
+    let flushed = local.flush();
+    assert_eq!(flushed.len(), 2);
+
+    let namespaced = flushed.iter().find(|m| m.metric_name == "request_count").unwrap();
+    assert_eq!(namespaced.namespace, &["http"]);
+
+    let top_level = flushed.iter().find(|m| m.metric_name == "uptime").unwrap();
+    assert!(top_level.namespace.is_empty());
 
     local.shutdown();
 }

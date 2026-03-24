@@ -144,11 +144,14 @@ impl StatsdExporter {
         }
     }
 
-    fn full_name(&self, metric_name: &str) -> String {
-        match &self.namespace {
-            Some(ns) => format!("{ns}.{metric_name}"),
-            None => metric_name.to_string(),
+    fn full_name(&self, namespace: &[&str], metric_name: &str) -> String {
+        let mut parts = Vec::new();
+        if let Some(ns) = &self.namespace {
+            parts.push(ns.as_str());
         }
+        parts.extend_from_slice(namespace);
+        parts.push(metric_name);
+        parts.join(".")
     }
 
     fn format_tags(&self, metric_tags: &[(&str, String)]) -> String {
@@ -173,7 +176,7 @@ impl StatsdExporter {
         let mut buffer = String::with_capacity(self.max_buffer_size);
 
         for metric in metrics {
-            let name = self.full_name(metric.metric_name);
+            let name = self.full_name(metric.namespace, metric.metric_name);
             let tags = self.format_tags(&metric.tags.pairs);
 
             let mut lines = Vec::new();
@@ -308,10 +311,13 @@ mod tests {
 
     impl FormatOnlyExporter {
         fn format_metric(&self, metric: &FlushedMetric) -> Vec<String> {
-            let name = match &self.namespace {
-                Some(ns) => format!("{ns}.{}", metric.metric_name),
-                None => metric.metric_name.to_string(),
-            };
+            let mut parts = Vec::new();
+            if let Some(ns) = &self.namespace {
+                parts.push(ns.as_str());
+            }
+            parts.extend_from_slice(metric.namespace);
+            parts.push(metric.metric_name);
+            let name = parts.join(".");
 
             let mut all_tags: Vec<(&str, &str)> = self
                 .default_tags
@@ -365,6 +371,7 @@ mod tests {
             histogram_mode: HistogramExportMode::default(),
         };
         let metric = FlushedMetric {
+            namespace: &[],
             metric_name: "request_count",
             tags: make_tags(vec![]),
             value: FlushedValue::Count(42),
@@ -381,6 +388,7 @@ mod tests {
             histogram_mode: HistogramExportMode::default(),
         };
         let metric = FlushedMetric {
+            namespace: &[],
             metric_name: "temperature",
             tags: make_tags(vec![]),
             value: FlushedValue::Gauge(23.5),
@@ -397,6 +405,7 @@ mod tests {
             histogram_mode: HistogramExportMode::default(),
         };
         let metric = FlushedMetric {
+            namespace: &[],
             metric_name: "req",
             tags: make_tags(vec![
                 ("endpoint", "/api".into()),
@@ -416,6 +425,7 @@ mod tests {
             histogram_mode: HistogramExportMode::default(),
         };
         let metric = FlushedMetric {
+            namespace: &[],
             metric_name: "req",
             tags: make_tags(vec![]),
             value: FlushedValue::Count(1),
@@ -432,6 +442,7 @@ mod tests {
             histogram_mode: HistogramExportMode::default(),
         };
         let metric = FlushedMetric {
+            namespace: &[],
             metric_name: "req",
             tags: make_tags(vec![("ep", "/api".into())]),
             value: FlushedValue::Count(1),
@@ -454,6 +465,7 @@ mod tests {
         }
 
         let metric = FlushedMetric {
+            namespace: &[],
             metric_name: "latency",
             tags: make_tags(vec![]),
             value: FlushedValue::Histogram(sketch),
@@ -479,6 +491,7 @@ mod tests {
         sketch.add_value(42.0);
 
         let metric = FlushedMetric {
+            namespace: &[],
             metric_name: "latency",
             tags: make_tags(vec![]),
             value: FlushedValue::Histogram(sketch),

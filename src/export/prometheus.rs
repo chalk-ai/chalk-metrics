@@ -83,11 +83,14 @@ impl PrometheusExporter {
         Arc::clone(&self.latest)
     }
 
-    fn full_name(&self, metric_name: &str) -> String {
-        match &self.namespace {
-            Some(ns) => format!("{ns}_{metric_name}"),
-            None => metric_name.to_string(),
+    fn full_name(&self, namespace: &[&str], metric_name: &str) -> String {
+        let mut parts = Vec::new();
+        if let Some(ns) = &self.namespace {
+            parts.push(ns.as_str());
         }
+        parts.extend_from_slice(namespace);
+        parts.push(metric_name);
+        parts.join("_")
     }
 
     /// Render metrics into Prometheus text exposition format.
@@ -99,7 +102,7 @@ impl PrometheusExporter {
         let mut out = String::with_capacity(4096);
 
         for metric in metrics {
-            let name = self.full_name(metric.metric_name);
+            let name = self.full_name(metric.namespace, metric.metric_name);
             let tags_str = format_tags(&metric.tags.pairs);
 
             match &metric.value {
@@ -206,6 +209,7 @@ mod tests {
     fn test_counter_format() {
         let exp = PrometheusExporter::builder().build();
         let metrics = vec![FlushedMetric {
+            namespace: &[],
             metric_name: "request_count",
             tags: make_tags(vec![]),
             value: FlushedValue::Count(42),
@@ -220,6 +224,7 @@ mod tests {
     fn test_gauge_format() {
         let exp = PrometheusExporter::builder().build();
         let metrics = vec![FlushedMetric {
+            namespace: &[],
             metric_name: "temperature",
             tags: make_tags(vec![]),
             value: FlushedValue::Gauge(23.5),
@@ -241,6 +246,7 @@ mod tests {
         }
 
         let metrics = vec![FlushedMetric {
+            namespace: &[],
             metric_name: "latency",
             tags: make_tags(vec![]),
             value: FlushedValue::Histogram(sketch),
@@ -259,6 +265,7 @@ mod tests {
     fn test_tags_formatting() {
         let exp = PrometheusExporter::builder().build();
         let metrics = vec![FlushedMetric {
+            namespace: &[],
             metric_name: "req",
             tags: make_tags(vec![
                 ("endpoint", "/api".into()),
@@ -274,6 +281,7 @@ mod tests {
     fn test_namespace_prefix() {
         let exp = PrometheusExporter::builder().namespace("myapp").build();
         let metrics = vec![FlushedMetric {
+            namespace: &[],
             metric_name: "req",
             tags: make_tags(vec![]),
             value: FlushedValue::Gauge(1.0),
@@ -292,6 +300,7 @@ mod tests {
         sketch.add_value(0.5);
 
         let metrics = vec![FlushedMetric {
+            namespace: &[],
             metric_name: "lat",
             tags: make_tags(vec![("ep", "/api".into())]),
             value: FlushedValue::Histogram(sketch),
@@ -299,5 +308,31 @@ mod tests {
         let text = exp.render(&metrics);
         assert!(text.contains("lat_bucket{ep=\"/api\",le=\"1\"} 1"));
         assert!(text.contains("lat_bucket{ep=\"/api\",le=\"+Inf\"} 1"));
+    }
+
+    #[test]
+    fn test_metric_namespace() {
+        let exp = PrometheusExporter::builder().build();
+        let metrics = vec![FlushedMetric {
+            namespace: &["http"],
+            metric_name: "request_count",
+            tags: make_tags(vec![]),
+            value: FlushedValue::Count(5),
+        }];
+        let text = exp.render(&metrics);
+        assert!(text.contains("http_request_count_total 5"), "text: {text}");
+    }
+
+    #[test]
+    fn test_nested_namespace_with_exporter_prefix() {
+        let exp = PrometheusExporter::builder().namespace("myapp").build();
+        let metrics = vec![FlushedMetric {
+            namespace: &["http", "auth"],
+            metric_name: "login_latency",
+            tags: make_tags(vec![]),
+            value: FlushedValue::Gauge(0.5),
+        }];
+        let text = exp.render(&metrics);
+        assert!(text.contains("myapp_http_auth_login_latency 0.5"), "text: {text}");
     }
 }

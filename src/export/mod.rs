@@ -20,6 +20,8 @@ pub enum FlushedValue {
 /// A single flushed metric with its identity, tags, and aggregated value.
 #[derive(Debug)]
 pub struct FlushedMetric {
+    /// Namespace path segments (e.g., `["http", "auth"]`). Empty for top-level metrics.
+    pub namespace: &'static [&'static str],
     pub metric_name: &'static str,
     pub tags: Arc<TagsData>,
     pub value: FlushedValue,

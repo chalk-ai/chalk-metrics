@@ -182,6 +182,7 @@ extern "C" fn atexit_handler() {
 pub fn record_count(
     metric_id: u16,
     metric_name: &'static str,
+    namespace: &'static [&'static str],
     tags_hash: u64,
     make_tags: impl FnOnce() -> Vec<(&'static str, String)>,
     delta: i64,
@@ -189,7 +190,7 @@ pub fn record_count(
     if let Some(client) = GLOBAL.get() {
         client
             .aggregator
-            .record_count(metric_id, metric_name, tags_hash, make_tags, delta);
+            .record_count(metric_id, metric_name, namespace, tags_hash, make_tags, delta);
     }
 }
 
@@ -198,6 +199,7 @@ pub fn record_count(
 pub fn record_gauge(
     metric_id: u16,
     metric_name: &'static str,
+    namespace: &'static [&'static str],
     tags_hash: u64,
     make_tags: impl FnOnce() -> Vec<(&'static str, String)>,
     value: f64,
@@ -205,7 +207,7 @@ pub fn record_gauge(
     if let Some(client) = GLOBAL.get() {
         client
             .aggregator
-            .record_gauge(metric_id, metric_name, tags_hash, make_tags, value);
+            .record_gauge(metric_id, metric_name, namespace, tags_hash, make_tags, value);
     }
 }
 
@@ -214,6 +216,7 @@ pub fn record_gauge(
 pub fn record_histogram(
     metric_id: u16,
     metric_name: &'static str,
+    namespace: &'static [&'static str],
     tags_hash: u64,
     make_tags: impl FnOnce() -> Vec<(&'static str, String)>,
     value: f64,
@@ -221,7 +224,7 @@ pub fn record_histogram(
     if let Some(client) = GLOBAL.get() {
         client
             .aggregator
-            .record_histogram(metric_id, metric_name, tags_hash, make_tags, value);
+            .record_histogram(metric_id, metric_name, namespace, tags_hash, make_tags, value);
     }
 }
 
@@ -233,12 +236,13 @@ impl MetricsClient {
         &self,
         metric_id: u16,
         metric_name: &'static str,
+        namespace: &'static [&'static str],
         tags_hash: u64,
         make_tags: impl FnOnce() -> Vec<(&'static str, String)>,
         delta: i64,
     ) {
         self.aggregator
-            .record_count(metric_id, metric_name, tags_hash, make_tags, delta);
+            .record_count(metric_id, metric_name, namespace, tags_hash, make_tags, delta);
     }
 
     /// Record a gauge value on this local client.
@@ -246,12 +250,13 @@ impl MetricsClient {
         &self,
         metric_id: u16,
         metric_name: &'static str,
+        namespace: &'static [&'static str],
         tags_hash: u64,
         make_tags: impl FnOnce() -> Vec<(&'static str, String)>,
         value: f64,
     ) {
         self.aggregator
-            .record_gauge(metric_id, metric_name, tags_hash, make_tags, value);
+            .record_gauge(metric_id, metric_name, namespace, tags_hash, make_tags, value);
     }
 
     /// Record a histogram value on this local client.
@@ -259,12 +264,13 @@ impl MetricsClient {
         &self,
         metric_id: u16,
         metric_name: &'static str,
+        namespace: &'static [&'static str],
         tags_hash: u64,
         make_tags: impl FnOnce() -> Vec<(&'static str, String)>,
         value: f64,
     ) {
         self.aggregator
-            .record_histogram(metric_id, metric_name, tags_hash, make_tags, value);
+            .record_histogram(metric_id, metric_name, namespace, tags_hash, make_tags, value);
     }
 
     /// Manually trigger a flush and return the flushed metrics.
@@ -303,9 +309,9 @@ mod tests {
     fn test_local_client_record_and_flush() {
         let client = builder().flush_interval(Duration::from_secs(60)).build_local();
 
-        client.record_count(0, "test_count", 100, || vec![("k", "v".into())], 5);
-        client.record_gauge(1, "test_gauge", 200, || vec![], 42.0);
-        client.record_histogram(2, "test_hist", 300, || vec![], 10.0);
+        client.record_count(0, "test_count", &[], 100, || vec![("k", "v".into())], 5);
+        client.record_gauge(1, "test_gauge", &[], 200, || vec![], 42.0);
+        client.record_histogram(2, "test_hist", &[], 300, || vec![], 10.0);
 
         let flushed = client.flush();
         assert_eq!(flushed.len(), 3);
@@ -325,7 +331,7 @@ mod tests {
             .flush_interval(Duration::from_millis(50))
             .build_local();
 
-        client.record_count(0, "c", 100, || vec![], 1);
+        client.record_count(0, "c", &[], 100, || vec![], 1);
 
         // Wait for at least one flush
         std::thread::sleep(Duration::from_millis(150));
@@ -342,9 +348,9 @@ mod tests {
     fn test_noop_when_not_initialized() {
         // Global may or may not be initialized depending on test order,
         // but calling record functions should never panic
-        record_count(0, "noop", 0, || vec![], 1);
-        record_gauge(0, "noop", 0, || vec![], 1.0);
-        record_histogram(0, "noop", 0, || vec![], 1.0);
+        record_count(0, "noop", &[], 0, || vec![], 1);
+        record_gauge(0, "noop", &[], 0, || vec![], 1.0);
+        record_histogram(0, "noop", &[], 0, || vec![], 1.0);
     }
 
     #[test]

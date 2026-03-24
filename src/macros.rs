@@ -1,16 +1,11 @@
 /// Record a count delta for a metric.
 ///
-/// The metric is identified by its `MetricId` variant, and tags are provided
-/// as the corresponding tags struct. The tags struct is hashed for the
-/// aggregation map key, and `export_pairs()` is only called on the cold path
-/// (first insertion).
-///
 /// # Example
 ///
 /// ```rust,ignore
 /// use chalk_metrics::generated::*;
 ///
-/// chalk_metrics::count!(RequestCount, 1, RequestCountTags {
+/// chalk_metrics::count!(HttpRequestCount, 1, HttpRequestCountTags {
 ///     endpoint: Endpoint::from("/api"),
 ///     status: Status::Success,
 /// });
@@ -28,6 +23,7 @@ macro_rules! count {
         $crate::client::record_count(
             $crate::generated::MetricId::$metric as u16,
             $crate::generated::MetricId::$metric.name(),
+            $crate::generated::MetricId::$metric.namespace(),
             hash,
             || tags.export_pairs(),
             $value,
@@ -40,7 +36,7 @@ macro_rules! count {
 /// # Example
 ///
 /// ```rust,ignore
-/// chalk_metrics::gauge!(ActiveConnections, 42.0, ActiveConnectionsTags {
+/// chalk_metrics::gauge!(HttpActiveConnections, 42.0, HttpActiveConnectionsTags {
 ///     endpoint: Endpoint::from("/api"),
 ///     region: None,
 /// });
@@ -58,6 +54,7 @@ macro_rules! gauge {
         $crate::client::record_gauge(
             $crate::generated::MetricId::$metric as u16,
             $crate::generated::MetricId::$metric.name(),
+            $crate::generated::MetricId::$metric.namespace(),
             hash,
             || tags.export_pairs(),
             $value,
@@ -70,7 +67,7 @@ macro_rules! gauge {
 /// # Example
 ///
 /// ```rust,ignore
-/// chalk_metrics::histogram!(RequestLatency, 0.042, RequestLatencyTags {
+/// chalk_metrics::histogram!(HttpRequestLatency, 0.042, HttpRequestLatencyTags {
 ///     endpoint: Endpoint::from("/api"),
 ///     status: Status::Success,
 /// });
@@ -88,6 +85,7 @@ macro_rules! histogram {
         $crate::client::record_histogram(
             $crate::generated::MetricId::$metric as u16,
             $crate::generated::MetricId::$metric.name(),
+            $crate::generated::MetricId::$metric.namespace(),
             hash,
             || tags.export_pairs(),
             $value,
@@ -101,12 +99,10 @@ mod tests {
 
     #[test]
     fn test_count_macro() {
-        // Verify the macro compiles and runs without panic (no-op since
-        // global client isn't initialized in unit tests)
         count!(
-            RequestCount,
+            HttpRequestCount,
             1,
-            RequestCountTags {
+            HttpRequestCountTags {
                 endpoint: Endpoint::from("/api"),
                 status: Status::Success,
             }
@@ -116,9 +112,9 @@ mod tests {
     #[test]
     fn test_gauge_macro() {
         gauge!(
-            ActiveConnections,
+            HttpActiveConnections,
             42.0,
-            ActiveConnectionsTags {
+            HttpActiveConnectionsTags {
                 endpoint: Endpoint::from("/api"),
                 region: None,
             }
@@ -128,9 +124,9 @@ mod tests {
     #[test]
     fn test_histogram_macro() {
         histogram!(
-            RequestLatency,
+            HttpRequestLatency,
             0.042,
-            RequestLatencyTags {
+            HttpRequestLatencyTags {
                 endpoint: Endpoint::from("/api"),
                 status: Status::Success,
             }
@@ -140,12 +136,21 @@ mod tests {
     #[test]
     fn test_macro_with_optional_tag() {
         gauge!(
-            ActiveConnections,
+            HttpActiveConnections,
             10.0,
-            ActiveConnectionsTags {
+            HttpActiveConnectionsTags {
                 endpoint: Endpoint::from("/api"),
                 region: Some(Region::from("us-east-1")),
             }
+        );
+    }
+
+    #[test]
+    fn test_top_level_metric() {
+        gauge!(
+            Uptime,
+            123.0,
+            UptimeTags {}
         );
     }
 
@@ -158,10 +163,10 @@ mod tests {
             .flush_interval(Duration::from_secs(60))
             .build_local();
 
-        // Record directly on the local client
         client.record_count(
-            MetricId::RequestCount as u16,
+            MetricId::HttpRequestCount as u16,
             "request_count",
+            &["http"],
             0,
             || vec![("endpoint", "/api".into()), ("status", "success".into())],
             5,
@@ -169,6 +174,8 @@ mod tests {
 
         let flushed = client.flush();
         assert_eq!(flushed.len(), 1);
+        assert_eq!(flushed[0].namespace, &["http"]);
+        assert_eq!(flushed[0].metric_name, "request_count");
 
         client.shutdown();
     }
