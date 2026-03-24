@@ -15,6 +15,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Format:** `cargo fmt`
 - **Check:** `cargo check`
 - **Run example:** `cargo run --example basic_usage`
+- **Benchmark:** `cargo bench`
 
 ## Important Rules
 

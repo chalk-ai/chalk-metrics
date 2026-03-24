@@ -12,6 +12,21 @@ libc = "0.2"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync", "net", "macros"] }
 async-trait = "0.1"
 
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
 [build-dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+[[bench]]
+name = "metrics_throughput"
+harness = false
+
+[[bench]]
+name = "prometheus_export"
+harness = false
+
+[[bench]]
+name = "statsd_export"
+harness = false
