@@ -6,9 +6,9 @@
 //! ## Overview
 //!
 //! Define your metrics in a JSON file, generate type-safe Rust code at build
-//! time, then record metrics with zero-allocation hot-path performance. Metrics
-//! are aggregated in-process using a 64-stripe concurrent map and exported on a
-//! configurable interval to one or more backends (Prometheus, StatsD, or custom).
+//! time, then record metrics with zero-allocation hot-path performance. Each
+//! metric is a struct with a `.record()` method that enforces the correct
+//! value type at compile time.
 //!
 //! ## Quick Start
 //!
@@ -20,9 +20,13 @@
 //!         "status": { "value_type": "enum", "values": ["success", "failure"], "export_name": "status" },
 //!         "endpoint": { "value_type": "string", "export_name": "endpoint" }
 //!     },
-//!     "metrics": [
-//!         { "name": "request_count", "type": "count", "tags": [{"tag": "endpoint"}, {"tag": "status"}], "description": "Total requests" }
-//!     ]
+//!     "namespaces": {
+//!         "http": {
+//!             "metrics": [
+//!                 { "name": "request_count", "type": "count", "tags": [{"tag": "endpoint"}, {"tag": "status"}], "description": "Total requests" }
+//!             ]
+//!         }
+//!     }
 //! }
 //! ```
 //!
@@ -41,6 +45,7 @@
 //!     include!(concat!(env!("OUT_DIR"), "/metrics_generated.rs"));
 //! }
 //!
+//! use metrics::*;
 //! use chalk_metrics::export::prometheus::PrometheusExporter;
 //!
 //! fn main() {
@@ -49,10 +54,11 @@
 //!         .flush_interval(std::time::Duration::from_secs(10))
 //!         .init();
 //!
-//!     chalk_metrics::count!(RequestCount, 1, metrics::RequestCountTags {
-//!         endpoint: metrics::Endpoint::from("/api"),
-//!         status: metrics::Status::Success,
-//!     });
+//!     // Type-safe recording — each struct IS the metric
+//!     HttpRequestCount {
+//!         endpoint: Endpoint::from("/api"),
+//!         status: Status::Success,
+//!     }.record();  // count: no arg = increment by 1
 //! }
 //! ```
 

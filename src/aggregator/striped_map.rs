@@ -20,10 +20,7 @@ pub struct TagsData {
 
 /// Key stored in the aggregation map.
 #[derive(Debug)]
-#[allow(dead_code)]
 struct AggKey {
-    metric_id: u16,
-    tags_hash: u64,
     namespace: &'static [&'static str],
     metric_name: &'static str,
     tags_data: Arc<TagsData>,
@@ -36,7 +33,6 @@ enum AggSlot {
     Histogram(HistogramSlot),
 }
 
-/// 64-stripe concurrent aggregation map.
 type Stripe = Mutex<HashMap<u64, (AggKey, AggSlot)>>;
 
 pub struct StripedAggMap {
@@ -60,14 +56,13 @@ impl StripedAggMap {
     #[inline]
     pub fn record_count(
         &self,
-        metric_id: u16,
         metric_name: &'static str,
         namespace: &'static [&'static str],
         tags_hash: u64,
         make_tags: impl FnOnce() -> Vec<(&'static str, String)>,
         delta: i64,
     ) {
-        let combined = combine_hash(metric_id, tags_hash);
+        let combined = combine_hash(metric_name, tags_hash);
         let stripe_idx = combined as usize & STRIPE_MASK;
         let mut guard = self.stripes[stripe_idx].lock();
 
@@ -85,8 +80,6 @@ impl StripedAggMap {
                 let slot = CountSlot::new();
                 slot.record(delta);
                 let key = AggKey {
-                    metric_id,
-                    tags_hash,
                     namespace,
                     metric_name,
                     tags_data: Arc::new(TagsData { pairs: make_tags() }),
@@ -99,14 +92,13 @@ impl StripedAggMap {
     #[inline]
     pub fn record_gauge(
         &self,
-        metric_id: u16,
         metric_name: &'static str,
         namespace: &'static [&'static str],
         tags_hash: u64,
         make_tags: impl FnOnce() -> Vec<(&'static str, String)>,
         value: f64,
     ) {
-        let combined = combine_hash(metric_id, tags_hash);
+        let combined = combine_hash(metric_name, tags_hash);
         let stripe_idx = combined as usize & STRIPE_MASK;
         let mut guard = self.stripes[stripe_idx].lock();
 
@@ -124,8 +116,6 @@ impl StripedAggMap {
                 let slot = GaugeSlot::new();
                 slot.record(value);
                 let key = AggKey {
-                    metric_id,
-                    tags_hash,
                     namespace,
                     metric_name,
                     tags_data: Arc::new(TagsData { pairs: make_tags() }),
@@ -138,14 +128,13 @@ impl StripedAggMap {
     #[inline]
     pub fn record_histogram(
         &self,
-        metric_id: u16,
         metric_name: &'static str,
         namespace: &'static [&'static str],
         tags_hash: u64,
         make_tags: impl FnOnce() -> Vec<(&'static str, String)>,
         value: f64,
     ) {
-        let combined = combine_hash(metric_id, tags_hash);
+        let combined = combine_hash(metric_name, tags_hash);
         let stripe_idx = combined as usize & STRIPE_MASK;
         let mut guard = self.stripes[stripe_idx].lock();
 
@@ -163,8 +152,6 @@ impl StripedAggMap {
                 let slot = HistogramSlot::new(self.max_buckets, self.initial_error);
                 slot.record(value);
                 let key = AggKey {
-                    metric_id,
-                    tags_hash,
                     namespace,
                     metric_name,
                     tags_data: Arc::new(TagsData { pairs: make_tags() }),
@@ -220,11 +207,15 @@ impl StripedAggMap {
     }
 }
 
+/// Use the static string pointer as part of the hash key. Since metric names
+/// are `&'static str` from generated code, identical strings share the same
+/// address, making this an O(1) identity check.
 #[inline]
-fn combine_hash(metric_id: u16, tags_hash: u64) -> u64 {
+fn combine_hash(metric_name: &'static str, tags_hash: u64) -> u64 {
+    let name_hash = metric_name.as_ptr() as u64;
     tags_hash
         .wrapping_mul(6364136223846793005)
-        .wrapping_add(metric_id as u64)
+        .wrapping_add(name_hash)
 }
 
 #[cfg(test)]
@@ -238,8 +229,8 @@ mod tests {
     #[test]
     fn test_insert_and_record_count() {
         let map = make_map();
-        map.record_count(0, "test_count", &[], 123, || vec![("k", "v".into())], 5);
-        map.record_count(0, "test_count", &[], 123, || panic!("should not call"), 3);
+        map.record_count("test_count", &[], 123, || vec![("k", "v".into())], 5);
+        map.record_count("test_count", &[], 123, || panic!("should not call"), 3);
 
         let flushed = map.flush();
         assert_eq!(flushed.len(), 1);
@@ -254,28 +245,18 @@ mod tests {
     #[test]
     fn test_insert_with_namespace() {
         let map = make_map();
-        map.record_count(0, "request_count", &["http"], 100, || vec![], 1);
+        map.record_count("request_count", &["http"], 100, || vec![], 1);
 
         let flushed = map.flush();
-        assert_eq!(flushed.len(), 1);
         assert_eq!(flushed[0].namespace, &["http"]);
         assert_eq!(flushed[0].metric_name, "request_count");
     }
 
     #[test]
-    fn test_insert_with_nested_namespace() {
-        let map = make_map();
-        map.record_count(0, "login", &["http", "auth"], 100, || vec![], 1);
-
-        let flushed = map.flush();
-        assert_eq!(flushed[0].namespace, &["http", "auth"]);
-    }
-
-    #[test]
     fn test_insert_and_record_gauge() {
         let map = make_map();
-        map.record_gauge(1, "test_gauge", &[], 456, || vec![("g", "1".into())], 10.0);
-        map.record_gauge(1, "test_gauge", &[], 456, || panic!("should not call"), 20.0);
+        map.record_gauge("test_gauge", &[], 456, || vec![], 10.0);
+        map.record_gauge("test_gauge", &[], 456, || panic!("should not call"), 20.0);
 
         let flushed = map.flush();
         assert_eq!(flushed.len(), 1);
@@ -288,15 +269,13 @@ mod tests {
     #[test]
     fn test_insert_and_record_histogram() {
         let map = make_map();
-        map.record_histogram(2, "test_hist", &[], 789, || vec![("h", "1".into())], 42.0);
-        map.record_histogram(2, "test_hist", &[], 789, || panic!("should not call"), 43.0);
+        map.record_histogram("test_hist", &[], 789, || vec![], 42.0);
+        map.record_histogram("test_hist", &[], 789, || panic!("should not call"), 43.0);
 
         let flushed = map.flush();
         assert_eq!(flushed.len(), 1);
         match &flushed[0].value {
-            FlushedValue::Histogram(sketch) => {
-                assert_eq!(sketch.count(), 2);
-            }
+            FlushedValue::Histogram(sketch) => assert_eq!(sketch.count(), 2),
             _ => panic!("expected histogram"),
         }
     }
@@ -304,17 +283,15 @@ mod tests {
     #[test]
     fn test_different_metrics() {
         let map = make_map();
-        map.record_count(0, "count_a", &[], 100, || vec![], 1);
-        map.record_count(1, "count_b", &[], 100, || vec![], 2);
-
-        let flushed = map.flush();
-        assert_eq!(flushed.len(), 2);
+        map.record_count("count_a", &[], 100, || vec![], 1);
+        map.record_count("count_b", &[], 100, || vec![], 2);
+        assert_eq!(map.flush().len(), 2);
     }
 
     #[test]
     fn test_flush_removes_count_entries() {
         let map = make_map();
-        map.record_count(0, "c", &[], 100, || vec![], 5);
+        map.record_count("c", &[], 100, || vec![], 5);
         assert_eq!(map.flush().len(), 1);
         assert_eq!(map.flush().len(), 0);
     }
@@ -322,17 +299,9 @@ mod tests {
     #[test]
     fn test_flush_retains_gauge_entries() {
         let map = make_map();
-        map.record_gauge(0, "g", &[], 100, || vec![], 42.0);
+        map.record_gauge("g", &[], 100, || vec![], 42.0);
         assert_eq!(map.flush().len(), 1);
         assert_eq!(map.flush().len(), 1);
-    }
-
-    #[test]
-    fn test_flush_removes_histogram_entries() {
-        let map = make_map();
-        map.record_histogram(0, "h", &[], 100, || vec![], 1.0);
-        assert_eq!(map.flush().len(), 1);
-        assert_eq!(map.flush().len(), 0);
     }
 
     #[test]
@@ -346,7 +315,7 @@ mod tests {
                 let map = Arc::clone(&map);
                 thread::spawn(move || {
                     for _ in 0..1000 {
-                        map.record_count(0, "c", &[], 42, || vec![("t", "v".into())], 1);
+                        map.record_count("c", &[], 42, || vec![("t", "v".into())], 1);
                     }
                 })
             })

@@ -36,7 +36,7 @@ impl std::error::Error for AlreadyInitializedError {}
 /// # Example
 ///
 /// ```rust,ignore
-/// chalk_metrics::builder()
+/// chalk_metrics::client::builder()
 ///     .with_exporter(PrometheusExporter::builder().build())
 ///     .flush_interval(Duration::from_secs(10))
 ///     .init();
@@ -60,8 +60,7 @@ impl MetricsClientBuilder {
         }
     }
 
-    /// Register an exporter. Multiple exporters can be registered; all will
-    /// receive flushed metrics on each interval.
+    /// Register an exporter. Multiple exporters can be registered.
     pub fn with_exporter(mut self, exporter: impl Exporter + 'static) -> Self {
         self.exporters.push(Box::new(exporter));
         self
@@ -73,8 +72,7 @@ impl MetricsClientBuilder {
         self
     }
 
-    /// Set the number of tokio worker threads for the flush runtime.
-    /// Default: 1 (current_thread). Values > 1 use a multi-thread runtime.
+    /// Set the number of tokio worker threads (default: 1).
     pub fn worker_threads(mut self, n: usize) -> Self {
         self.worker_threads = n.max(1);
         self
@@ -102,14 +100,12 @@ impl MetricsClientBuilder {
     }
 
     /// Try to initialize the global metrics client singleton.
-    /// Returns `Err` if already initialized.
     pub fn try_init(self) -> Result<(), AlreadyInitializedError> {
         let client = self.build_inner();
         GLOBAL
             .set(client)
             .map_err(|_| AlreadyInitializedError)?;
 
-        // Register atexit handler for automatic shutdown on program exit
         unsafe {
             libc::atexit(atexit_handler);
         }
@@ -159,8 +155,7 @@ pub fn builder() -> MetricsClientBuilder {
     MetricsClientBuilder::new()
 }
 
-/// Shut down the global metrics client, performing a final flush.
-/// Safe to call multiple times (idempotent).
+/// Shut down the global metrics client. Safe to call multiple times.
 pub fn shutdown() {
     if SHUTDOWN_CALLED
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -180,7 +175,6 @@ extern "C" fn atexit_handler() {
 /// Record a count delta. No-op if the client is not initialized.
 #[inline]
 pub fn record_count(
-    metric_id: u16,
     metric_name: &'static str,
     namespace: &'static [&'static str],
     tags_hash: u64,
@@ -190,14 +184,13 @@ pub fn record_count(
     if let Some(client) = GLOBAL.get() {
         client
             .aggregator
-            .record_count(metric_id, metric_name, namespace, tags_hash, make_tags, delta);
+            .record_count(metric_name, namespace, tags_hash, make_tags, delta);
     }
 }
 
 /// Record a gauge value. No-op if the client is not initialized.
 #[inline]
 pub fn record_gauge(
-    metric_id: u16,
     metric_name: &'static str,
     namespace: &'static [&'static str],
     tags_hash: u64,
@@ -207,14 +200,13 @@ pub fn record_gauge(
     if let Some(client) = GLOBAL.get() {
         client
             .aggregator
-            .record_gauge(metric_id, metric_name, namespace, tags_hash, make_tags, value);
+            .record_gauge(metric_name, namespace, tags_hash, make_tags, value);
     }
 }
 
 /// Record a histogram value. No-op if the client is not initialized.
 #[inline]
 pub fn record_histogram(
-    metric_id: u16,
     metric_name: &'static str,
     namespace: &'static [&'static str],
     tags_hash: u64,
@@ -224,17 +216,15 @@ pub fn record_histogram(
     if let Some(client) = GLOBAL.get() {
         client
             .aggregator
-            .record_histogram(metric_id, metric_name, namespace, tags_hash, make_tags, value);
+            .record_histogram(metric_name, namespace, tags_hash, make_tags, value);
     }
 }
 
 // ── Local client recording API (for testing) ───────────────────────────
 
 impl MetricsClient {
-    /// Record a count delta on this local client.
     pub fn record_count(
         &self,
-        metric_id: u16,
         metric_name: &'static str,
         namespace: &'static [&'static str],
         tags_hash: u64,
@@ -242,13 +232,11 @@ impl MetricsClient {
         delta: i64,
     ) {
         self.aggregator
-            .record_count(metric_id, metric_name, namespace, tags_hash, make_tags, delta);
+            .record_count(metric_name, namespace, tags_hash, make_tags, delta);
     }
 
-    /// Record a gauge value on this local client.
     pub fn record_gauge(
         &self,
-        metric_id: u16,
         metric_name: &'static str,
         namespace: &'static [&'static str],
         tags_hash: u64,
@@ -256,13 +244,11 @@ impl MetricsClient {
         value: f64,
     ) {
         self.aggregator
-            .record_gauge(metric_id, metric_name, namespace, tags_hash, make_tags, value);
+            .record_gauge(metric_name, namespace, tags_hash, make_tags, value);
     }
 
-    /// Record a histogram value on this local client.
     pub fn record_histogram(
         &self,
-        metric_id: u16,
         metric_name: &'static str,
         namespace: &'static [&'static str],
         tags_hash: u64,
@@ -270,7 +256,7 @@ impl MetricsClient {
         value: f64,
     ) {
         self.aggregator
-            .record_histogram(metric_id, metric_name, namespace, tags_hash, make_tags, value);
+            .record_histogram(metric_name, namespace, tags_hash, make_tags, value);
     }
 
     /// Manually trigger a flush and return the flushed metrics.
@@ -302,20 +288,18 @@ mod tests {
         let b = MetricsClientBuilder::new();
         assert_eq!(b.flush_interval, Duration::from_secs(10));
         assert_eq!(b.worker_threads, 1);
-        assert_eq!(b.max_buckets, 200);
     }
 
     #[test]
     fn test_local_client_record_and_flush() {
         let client = builder().flush_interval(Duration::from_secs(60)).build_local();
 
-        client.record_count(0, "test_count", &[], 100, || vec![("k", "v".into())], 5);
-        client.record_gauge(1, "test_gauge", &[], 200, || vec![], 42.0);
-        client.record_histogram(2, "test_hist", &[], 300, || vec![], 10.0);
+        client.record_count("test_count", &[], 100, || vec![("k", "v".into())], 5);
+        client.record_gauge("test_gauge", &[], 200, || vec![], 42.0);
+        client.record_histogram("test_hist", &[], 300, || vec![], 10.0);
 
         let flushed = client.flush();
         assert_eq!(flushed.len(), 3);
-
         client.shutdown();
     }
 
@@ -331,32 +315,24 @@ mod tests {
             .flush_interval(Duration::from_millis(50))
             .build_local();
 
-        client.record_count(0, "c", &[], 100, || vec![], 1);
+        client.record_count("c", &[], 100, || vec![], 1);
 
-        // Wait for at least one flush
         std::thread::sleep(Duration::from_millis(150));
-
-        assert!(
-            export_count.load(Ordering::Relaxed) > 0,
-            "exporter should have been called"
-        );
-
+        assert!(export_count.load(Ordering::Relaxed) > 0);
         client.shutdown();
     }
 
     #[test]
     fn test_noop_when_not_initialized() {
-        // Global may or may not be initialized depending on test order,
-        // but calling record functions should never panic
-        record_count(0, "noop", &[], 0, || vec![], 1);
-        record_gauge(0, "noop", &[], 0, || vec![], 1.0);
-        record_histogram(0, "noop", &[], 0, || vec![], 1.0);
+        record_count("noop", &[], 0, || vec![], 1);
+        record_gauge("noop", &[], 0, || vec![], 1.0);
+        record_histogram("noop", &[], 0, || vec![], 1.0);
     }
 
     #[test]
     fn test_shutdown_is_idempotent() {
         let client = builder().flush_interval(Duration::from_secs(60)).build_local();
         client.shutdown();
-        client.shutdown(); // should not panic
+        client.shutdown();
     }
 }

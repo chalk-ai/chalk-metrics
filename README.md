@@ -2,16 +2,15 @@
 
 Efficient metrics aggregation with compile-time code generation and pluggable exporters.
 
-Define your metrics in a JSON file, generate type-safe Rust code at build time, then record metrics with zero-allocation hot-path performance. Metrics are aggregated in-process using a 64-stripe concurrent map and exported on a configurable interval to one or more backends.
+Define your metrics in a JSON file, generate type-safe Rust code at build time, then record metrics with zero-allocation hot-path performance. Each metric is a struct — call `.record()` and the value type is enforced at compile time.
 
 ## Features
 
-- **Compile-time code generation** from a JSON schema: type-safe metric IDs, tag structs, and enum tag values
-- **Three metric types**: Count (up/down counter), Gauge (last-value-wins), Histogram (UDD Sketch with approximate quantiles)
-- **Zero-allocation hot path**: striped `parking_lot` locks with `hashbrown::RawEntryMut` — only allocates on first-seen tag combinations
-- **Pluggable exporters**: Prometheus text format and StatsD/DogStatsD included, plus an async `Exporter` trait for custom backends
-- **Singleton client**: `env_logger`-style `init()`/`try_init()` with automatic shutdown via `atexit`
-- **Drain-on-flush**: count and histogram entries are removed after each flush; gauge entries persist
+- **Type-safe recording**: Each metric is a struct with `.record(value)`. Count metrics accept `i64` (or no arg for +1), gauge/histogram accept `f64`. Wrong type = compile error.
+- **Hierarchical namespaces**: Nest metrics under namespace blocks in JSON. Exporters receive namespace segments and format them (Prometheus uses `_`, StatsD uses `.`).
+- **Zero-allocation hot path**: Striped `parking_lot` locks with `hashbrown::RawEntryMut` — only allocates on first-seen tag combinations.
+- **Pluggable exporters**: Prometheus text format and StatsD/DogStatsD included, plus an async `Exporter` trait for custom backends.
+- **Singleton client**: `env_logger`-style `init()`/`try_init()` with automatic shutdown via `atexit`.
 
 ## Quick Start
 
@@ -32,24 +31,36 @@ Define your metrics in a JSON file, generate type-safe Rust code at build time, 
     },
     "metrics": [
         {
-            "name": "request_count",
-            "type": "count",
-            "tags": [
-                { "tag": "endpoint" },
-                { "tag": "status" }
-            ],
-            "description": "Total HTTP requests"
-        },
-        {
-            "name": "request_latency",
-            "type": "histogram",
-            "tags": [
-                { "tag": "endpoint" },
-                { "tag": "status" }
-            ],
-            "description": "HTTP request latency in seconds"
+            "name": "uptime",
+            "type": "gauge",
+            "tags": [],
+            "description": "Process uptime in seconds"
         }
-    ]
+    ],
+    "namespaces": {
+        "http": {
+            "metrics": [
+                {
+                    "name": "request_count",
+                    "type": "count",
+                    "tags": [
+                        { "tag": "endpoint" },
+                        { "tag": "status" }
+                    ],
+                    "description": "Total HTTP requests"
+                },
+                {
+                    "name": "request_latency",
+                    "type": "histogram",
+                    "tags": [
+                        { "tag": "endpoint" },
+                        { "tag": "status" }
+                    ],
+                    "description": "HTTP request latency in seconds"
+                }
+            ]
+        }
+    }
 }
 ```
 
@@ -75,30 +86,37 @@ mod metrics {
 
 ```rust
 use chalk_metrics::export::prometheus::PrometheusExporter;
+use metrics::*;
 use std::time::Duration;
 
 fn main() {
     let prom = PrometheusExporter::builder().namespace("myapp").build();
-    let text_handle = prom.text_handle();
 
     chalk_metrics::client::builder()
         .with_exporter(prom)
         .flush_interval(Duration::from_secs(10))
         .init();
 
-    // Record metrics using macros
-    chalk_metrics::count!(RequestCount, 1, metrics::RequestCountTags {
-        endpoint: metrics::Endpoint::from("/api"),
-        status: metrics::Status::Success,
-    });
+    // Count — increment by 1 (no arg)
+    HttpRequestCount {
+        endpoint: Endpoint::from("/api"),
+        status: Status::Success,
+    }.record();
 
-    chalk_metrics::histogram!(RequestLatency, 0.042, metrics::RequestLatencyTags {
-        endpoint: metrics::Endpoint::from("/api"),
-        status: metrics::Status::Success,
-    });
+    // Count — explicit delta
+    HttpRequestCount {
+        endpoint: Endpoint::from("/api"),
+        status: Status::Failure,
+    }.record_value(5);
 
-    // Read Prometheus output (serve at /metrics in your HTTP server)
-    let output = text_handle.read().clone();
+    // Histogram — f64 value
+    HttpRequestLatency {
+        endpoint: Endpoint::from("/api"),
+        status: Status::Success,
+    }.record(0.042);
+
+    // Gauge — f64 value (top-level, no namespace)
+    Uptime {}.record(42.0);
 }
 ```
 
@@ -112,7 +130,32 @@ Tags are defined globally and reused across metrics.
 |---|---|---|
 | `value_type` | `"enum"` or `"string"` | Whether values are constrained to a fixed set |
 | `values` | `string[]` | Required for enum tags: the allowed values |
-| `export_name` | `string` | Default key name used when exporting |
+| `export_name` | `string` | Default key name used when exporting. Also used as the struct field name. |
+
+### Namespaces
+
+Metrics can be organized in hierarchical namespace blocks. Namespaces can be nested arbitrarily deep.
+
+```json
+{
+    "namespaces": {
+        "http": {
+            "metrics": [...],
+            "namespaces": {
+                "auth": {
+                    "metrics": [...]
+                }
+            }
+        }
+    },
+    "metrics": [...]
+}
+```
+
+- Metrics under `http` get namespace `["http"]`
+- Metrics under `http > auth` get namespace `["http", "auth"]`
+- Top-level metrics get namespace `[]`
+- Struct names include the namespace path: `HttpAuthLoginLatency`
 
 ### Metric Definitions
 
@@ -128,25 +171,28 @@ Tags are defined globally and reused across metrics.
 | Field | Type | Description |
 |---|---|---|
 | `tag` | `string` | Name of the tag definition |
-| `export_name` | `string?` | Override the export key for this metric |
+| `export_name` | `string?` | Override the export key and struct field name |
 | `optional` | `bool` | Whether this tag can be omitted (default: false) |
 
 ## Exporters
 
 ### Prometheus
 
-Format-only exporter — renders metrics in Prometheus text exposition format. Use `get_metrics_text()` or `text_handle()` to retrieve the output and serve it from your own HTTP server.
+Format-only exporter — renders metrics in Prometheus text exposition format.
 
 ```rust
 let prom = PrometheusExporter::builder()
     .namespace("myapp")
     .bucket_boundaries(vec![0.01, 0.05, 0.1, 0.5, 1.0, 5.0])
     .build();
+
+// After flush, read the text output:
+let text = prom.get_metrics_text();
 ```
 
-### StatsD / DogStatsD
+Namespace segments are joined with `_`: `myapp_http_request_count_total`.
 
-Sends metrics over UDP or Unix domain sockets in DogStatsD format.
+### StatsD / DogStatsD
 
 ```rust
 // UDP
@@ -162,16 +208,19 @@ let statsd = StatsdExporter::uds("/var/run/datadog/dsd.socket")
     .build()?;
 ```
 
-### Custom Exporters
+Namespace segments are joined with `.`: `myapp.http.request_count`.
 
-Implement the `Exporter` trait:
+### Custom Exporters
 
 ```rust
 #[async_trait::async_trait]
 impl Exporter for MyExporter {
     async fn export(&self, metrics: &[FlushedMetric]) -> Result<(), ExportError> {
         for m in metrics {
-            // m.metric_name, m.tags.pairs, m.value
+            // m.namespace: &[&str]  — e.g., ["http", "auth"]
+            // m.metric_name: &str   — e.g., "request_count"
+            // m.tags.pairs: Vec<(&str, String)>
+            // m.value: FlushedValue
         }
         Ok(())
     }

@@ -12,40 +12,34 @@ fn main() {
         .flush_interval(Duration::from_millis(100))
         .init();
 
-    // Record namespaced metrics
-    for i in 0..10 {
-        chalk_metrics::count!(
-            HttpRequestCount,
-            1,
-            HttpRequestCountTags {
-                endpoint: Endpoint::from("/api/v1"),
-                status: Status::Success,
-            }
-        );
-
-        chalk_metrics::histogram!(
-            HttpRequestLatency,
-            0.01 * (i as f64 + 1.0),
-            HttpRequestLatencyTags {
-                endpoint: Endpoint::from("/api/v1"),
-                status: Status::Success,
-            }
-        );
+    // Record namespaced count metrics (increment by 1)
+    for _ in 0..10 {
+        HttpRequestCount {
+            endpoint: Endpoint::from("/api/v1"),
+            status: Status::Success,
+        }
+        .record();
     }
 
-    // Record a top-level metric (no namespace)
-    chalk_metrics::gauge!(Uptime, 42.0, UptimeTags {});
-
-    // Record a metric in the resolver namespace
-    chalk_metrics::histogram!(
-        ResolverLatency,
-        0.005,
-        ResolverLatencyTags {
-            endpoint: Endpoint::from("my.resolver"),
-            resolver_status: Status::Success,
-            resolver_fqn: Some(Endpoint::from("my.resolver.fqn")),
+    // Record namespaced histogram
+    for i in 0..10 {
+        HttpRequestLatency {
+            endpoint: Endpoint::from("/api/v1"),
+            status: Status::Success,
         }
-    );
+        .record(0.01 * (i as f64 + 1.0));
+    }
+
+    // Top-level gauge (no namespace)
+    Uptime {}.record(42.0);
+
+    // Resolver namespace histogram with export_name overrides
+    ResolverLatency {
+        endpoint: Endpoint::from("my.resolver"),
+        resolver_status: Status::Success,
+        resolver_fqn: Some(Endpoint::from("my.resolver.fqn")),
+    }
+    .record(0.005);
 
     std::thread::sleep(Duration::from_millis(200));
 

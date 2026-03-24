@@ -4,7 +4,6 @@ use std::time::Duration;
 use chalk_metrics::client;
 use chalk_metrics::export::prometheus::PrometheusExporter;
 use chalk_metrics::export::{ExportError, Exporter, FlushedMetric, FlushedValue};
-use chalk_metrics::generated::*;
 
 use parking_lot::Mutex;
 
@@ -41,38 +40,22 @@ fn test_full_pipeline_with_prometheus() {
         .flush_interval(Duration::from_secs(60))
         .build_local();
 
-    local.record_count(
-        MetricId::HttpRequestCount as u16,
-        "request_count",
-        &["http"],
-        0,
-        || vec![("endpoint", "/api".into()), ("status", "success".into())],
-        10,
-    );
+    local.record_count("request_count", &["http"], 0, || {
+        vec![("endpoint", "/api".into()), ("status", "success".into())]
+    }, 10);
 
-    local.record_gauge(
-        MetricId::HttpActiveConnections as u16,
-        "active_connections",
-        &["http"],
-        1,
-        || vec![("endpoint", "/api".into())],
-        42.0,
-    );
+    local.record_gauge("active_connections", &["http"], 1, || {
+        vec![("endpoint", "/api".into())]
+    }, 42.0);
 
-    local.record_histogram(
-        MetricId::HttpRequestLatency as u16,
-        "request_latency",
-        &["http"],
-        2,
-        || vec![("endpoint", "/api".into()), ("status", "success".into())],
-        0.5,
-    );
+    local.record_histogram("request_latency", &["http"], 2, || {
+        vec![("endpoint", "/api".into()), ("status", "success".into())]
+    }, 0.5);
 
     let flushed = local.flush();
     assert_eq!(flushed.len(), 3);
 
     let text = prom.render_metrics(&flushed);
-    // With exporter namespace "test" + metric namespace "http" + metric name
     assert!(text.contains("test_http_request_count_total"), "text: {text}");
     assert!(text.contains("test_http_active_connections"), "text: {text}");
     assert!(text.contains("test_http_request_latency_bucket"), "text: {text}");
@@ -94,15 +77,10 @@ fn test_multiple_exporters() {
         .flush_interval(Duration::from_millis(50))
         .build_local();
 
-    local.record_count(0, "test", &[], 0, || vec![], 1);
+    local.record_count("test", &[], 0, || vec![], 1);
 
     std::thread::sleep(Duration::from_millis(150));
-
-    assert!(
-        !collected.lock().is_empty(),
-        "collecting exporter should have been called"
-    );
-
+    assert!(!collected.lock().is_empty());
     local.shutdown();
 }
 
@@ -120,7 +98,6 @@ fn test_high_throughput() {
             std::thread::spawn(move || {
                 for _ in 0..10_000 {
                     local.record_count(
-                        0,
                         "throughput_test",
                         &[],
                         thread_id,
@@ -156,7 +133,7 @@ fn test_histogram_quantile_accuracy() {
         .build_local();
 
     for i in 1..=1000 {
-        local.record_histogram(0, "accuracy_test", &[], 0, || vec![], i as f64);
+        local.record_histogram("accuracy_test", &[], 0, || vec![], i as f64);
     }
 
     let flushed = local.flush();
@@ -182,8 +159,8 @@ fn test_namespace_in_flushed_metrics() {
         .flush_interval(Duration::from_secs(60))
         .build_local();
 
-    local.record_count(0, "request_count", &["http"], 0, || vec![], 1);
-    local.record_gauge(1, "uptime", &[], 1, || vec![], 99.9);
+    local.record_count("request_count", &["http"], 0, || vec![], 1);
+    local.record_gauge("uptime", &[], 1, || vec![], 99.9);
 
     let flushed = local.flush();
     assert_eq!(flushed.len(), 2);

@@ -4,5 +4,5 @@ mod schema;
 mod codegen;
 
 fn main() {
-    codegen::generate("metrics.json");
+    codegen::generate_with_crate_path("metrics.json", "crate");
 }

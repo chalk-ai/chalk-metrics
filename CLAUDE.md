@@ -16,33 +16,46 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Check:** `cargo check`
 - **Run example:** `cargo run --example basic_usage`
 
+## Important Rules
+
+- **Any change to the public API must also update docstrings, README.md, and crate-level docs in lib.rs.** Documentation must stay in sync with the code.
+
 ## Architecture
 
 ### Code Generation Pipeline
-- Users define metrics in a JSON file (see `metrics.json` for the schema)
-- `src/codegen.rs` exposes `generate(path)` — called from `build.rs` at compile time
-- Generates `metrics_generated.rs` in `OUT_DIR`: tag types (enum/string), per-metric tag structs, `MetricId` enum
-- `src/generated.rs` includes the generated code via `include!`
-- `src/schema.rs` defines the JSON schema serde types and validation logic
+- Users define metrics in a JSON file with hierarchical namespaces (see `metrics.json`)
+- `src/codegen.rs` exposes `generate(path)` (for external crates) and `generate_with_crate_path(path, crate_path)` (for internal use)
+- Called from `build.rs` at compile time → generates `metrics_generated.rs` in `OUT_DIR`
+- Each metric becomes a struct (e.g., `HttpRequestCount`) with a `.record()` method
+- Count metrics: `.record()` (increment by 1) and `.record_value(i64)`
+- Gauge/Histogram metrics: `.record(f64)`
+- The struct IS the metric identity — no separate MetricId enum
+- `src/schema.rs` defines the JSON schema serde types, namespace tree, and validation
+
+### Recording API (Type-Safe)
+- Each generated struct has `.record()` with the correct value type enforced at compile time
+- Struct field names come from the tag's `export_name` (from JSON)
+- Structs are namespace-prefixed for uniqueness: `HttpAuthLoginLatency` for `http > auth > login_latency`
+- Associated consts `NAME` and `NAMESPACE` on each struct provide metric identity
 
 ### Aggregation
-- `src/aggregator/striped_map.rs` — 64-stripe concurrent map using `parking_lot::Mutex` and `hashbrown::RawEntryMut` for zero-allocation hot-path
-- `src/aggregator/count.rs` — lock-free `AtomicI64` counter (swap-to-zero on flush)
-- `src/aggregator/gauge.rs` — lock-free `AtomicU64` gauge storing f64 as bits (persists across flushes)
-- `src/aggregator/sketch.rs` — UDD Sketch for approximate quantile estimation (ported from Timescale, Apache 2.0)
-- `src/aggregator/histogram.rs` — `parking_lot::Mutex<UDDSketch>` wrapper (clone-and-reset on flush)
+- `src/aggregator/striped_map.rs` — 64-stripe concurrent map using `parking_lot::Mutex` and `hashbrown::RawEntryMut`
+- Uses `&'static str` pointer address for metric identity hashing (no u16 discriminant)
+- `src/aggregator/count.rs` — lock-free `AtomicI64` (swap-to-zero on flush)
+- `src/aggregator/gauge.rs` — lock-free `AtomicU64` storing f64 as bits (persists across flushes)
+- `src/aggregator/sketch.rs` — UDD Sketch for approximate quantiles (from Timescale, Apache 2.0)
+- `src/aggregator/histogram.rs` — `parking_lot::Mutex<UDDSketch>` (clone-and-reset on flush)
 
 ### Client & Worker
-- `src/client.rs` — `OnceLock` singleton, builder pattern (`init()`/`try_init()`), `atexit` auto-shutdown, recording free functions
-- `src/worker.rs` — dedicated OS thread running tokio `current_thread` runtime for periodic flush + export
-- `src/macros.rs` — `count!`, `gauge!`, `histogram!` macros connecting generated types to the recording API
+- `src/client.rs` — `OnceLock` singleton, builder pattern, `atexit` auto-shutdown
+- `src/worker.rs` — dedicated OS thread with tokio runtime for periodic flush + export
 
 ### Exporters
-- `src/export/mod.rs` — async `Exporter` trait, `FlushedMetric`/`FlushedValue` types
-- `src/export/prometheus.rs` — Prometheus text format renderer with configurable bucket boundaries
-- `src/export/statsd.rs` — DogStatsD format over UDP/UDS with batching, UDS reconnection, configurable histogram export mode
+- `src/export/mod.rs` — async `Exporter` trait; exporters receive `namespace: &[&str]` and decide how to format
+- `src/export/prometheus.rs` — joins namespace segments with `_`
+- `src/export/statsd.rs` — joins namespace segments with `.`; supports UDP/UDS with reconnection
 
 ### Flush Behavior
-- Counts and histograms are **drained** from the map on flush (re-created on next record)
-- Gauges **persist** across flushes (last-value-wins semantics)
+- Counts and histograms are drained from the map on flush
+- Gauges persist across flushes
 - Tags data is `Arc`-shared — flush does a cheap pointer bump, no string copies
