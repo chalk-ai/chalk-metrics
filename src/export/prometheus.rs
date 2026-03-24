@@ -168,7 +168,7 @@ impl PrometheusExporter {
     }
 }
 
-fn format_tags(pairs: &[(&str, String)]) -> String {
+fn format_tags(pairs: &[(&str, std::borrow::Cow<'static, str>)]) -> String {
     if pairs.is_empty() {
         return String::new();
     }
@@ -201,7 +201,7 @@ mod tests {
     use crate::aggregator::striped_map::TagsData;
     use std::sync::Arc;
 
-    fn make_tags(pairs: Vec<(&'static str, String)>) -> Arc<TagsData> {
+    fn make_tags(pairs: Vec<(&'static str, std::borrow::Cow<'static, str>)>) -> Arc<TagsData> {
         Arc::new(TagsData { pairs })
     }
 

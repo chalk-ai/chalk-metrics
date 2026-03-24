@@ -18,7 +18,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Important Rules
 
-- **Any change to the public API must also update docstrings, README.md, and crate-level docs in lib.rs.** Documentation must stay in sync with the code.
+- **Every change** must include a check: do docstrings, README.md, or crate-level docs in lib.rs need updating? If yes, update them in the same change. Documentation must always stay in sync with the code.
 
 ## Architecture
 
@@ -54,6 +54,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `src/export/mod.rs` — async `Exporter` trait; exporters receive `namespace: &[&str]` and decide how to format
 - `src/export/prometheus.rs` — joins namespace segments with `_`
 - `src/export/statsd.rs` — joins namespace segments with `.`; supports UDP/UDS with reconnection
+
+### Tag Values
+- Tag values use `Cow<'static, str>` — enum tags are `Cow::Borrowed(&'static str)` (zero allocation), string tags are `Cow::Owned(String)`
+- `TagsData.pairs` is `Vec<(&'static str, Cow<'static, str>)>`
 
 ### Flush Behavior
 - Counts and histograms are drained from the map on flush

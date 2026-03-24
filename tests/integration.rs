@@ -101,7 +101,7 @@ fn test_high_throughput() {
                         "throughput_test",
                         &[],
                         thread_id,
-                        || vec![("tid", format!("{thread_id}"))],
+                        || vec![("tid", std::borrow::Cow::Owned(format!("{thread_id}")))],
                         1,
                     );
                 }

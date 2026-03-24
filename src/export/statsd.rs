@@ -154,14 +154,14 @@ impl StatsdExporter {
         parts.join(".")
     }
 
-    fn format_tags(&self, metric_tags: &[(&str, String)]) -> String {
+    fn format_tags(&self, metric_tags: &[(&str, std::borrow::Cow<'static, str>)]) -> String {
         let mut all_tags: Vec<(&str, &str)> = self
             .default_tags
             .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .map(|(k, v)| (k.as_str(), v.as_ref()))
             .collect();
         for (k, v) in metric_tags {
-            all_tags.push((k, v.as_str()));
+            all_tags.push((k, v.as_ref()));
         }
         if all_tags.is_empty() {
             String::new()
@@ -298,7 +298,7 @@ mod tests {
     use crate::aggregator::striped_map::TagsData;
     use std::sync::Arc;
 
-    fn make_tags(pairs: Vec<(&'static str, String)>) -> Arc<TagsData> {
+    fn make_tags(pairs: Vec<(&'static str, std::borrow::Cow<'static, str>)>) -> Arc<TagsData> {
         Arc::new(TagsData { pairs })
     }
 
@@ -322,10 +322,10 @@ mod tests {
             let mut all_tags: Vec<(&str, &str)> = self
                 .default_tags
                 .iter()
-                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .map(|(k, v)| (k.as_str(), v.as_ref()))
                 .collect();
             for (k, v) in &metric.tags.pairs {
-                all_tags.push((k, v.as_str()));
+                all_tags.push((k, v.as_ref()));
             }
             let tags = if all_tags.is_empty() {
                 String::new()

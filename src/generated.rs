@@ -78,7 +78,8 @@ mod tests {
         };
         let pairs = tags.export_pairs();
         assert_eq!(pairs.len(), 1);
-        assert_eq!(pairs[0], ("endpoint", "api/v1".to_string()));
+        assert_eq!(pairs[0].0, "endpoint");
+        assert_eq!(pairs[0].1.as_ref(), "api/v1");
 
         let tags_with = HttpActiveConnections {
             endpoint: Endpoint::from("api/v1"),

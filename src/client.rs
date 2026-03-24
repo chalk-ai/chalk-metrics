@@ -178,7 +178,7 @@ pub fn record_count(
     metric_name: &'static str,
     namespace: &'static [&'static str],
     tags_hash: u64,
-    make_tags: impl FnOnce() -> Vec<(&'static str, String)>,
+    make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
     delta: i64,
 ) {
     if let Some(client) = GLOBAL.get() {
@@ -194,7 +194,7 @@ pub fn record_gauge(
     metric_name: &'static str,
     namespace: &'static [&'static str],
     tags_hash: u64,
-    make_tags: impl FnOnce() -> Vec<(&'static str, String)>,
+    make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
     value: f64,
 ) {
     if let Some(client) = GLOBAL.get() {
@@ -210,7 +210,7 @@ pub fn record_histogram(
     metric_name: &'static str,
     namespace: &'static [&'static str],
     tags_hash: u64,
-    make_tags: impl FnOnce() -> Vec<(&'static str, String)>,
+    make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
     value: f64,
 ) {
     if let Some(client) = GLOBAL.get() {
@@ -228,7 +228,7 @@ impl MetricsClient {
         metric_name: &'static str,
         namespace: &'static [&'static str],
         tags_hash: u64,
-        make_tags: impl FnOnce() -> Vec<(&'static str, String)>,
+        make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
         delta: i64,
     ) {
         self.aggregator
@@ -240,7 +240,7 @@ impl MetricsClient {
         metric_name: &'static str,
         namespace: &'static [&'static str],
         tags_hash: u64,
-        make_tags: impl FnOnce() -> Vec<(&'static str, String)>,
+        make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
         value: f64,
     ) {
         self.aggregator
@@ -252,7 +252,7 @@ impl MetricsClient {
         metric_name: &'static str,
         namespace: &'static [&'static str],
         tags_hash: u64,
-        make_tags: impl FnOnce() -> Vec<(&'static str, String)>,
+        make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
         value: f64,
     ) {
         self.aggregator

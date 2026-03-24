@@ -15,7 +15,7 @@ const STRIPE_MASK: usize = 63;
 /// Contains `(export_name, value)` pairs computed once on insertion.
 #[derive(Debug, Clone)]
 pub struct TagsData {
-    pub pairs: Vec<(&'static str, String)>,
+    pub pairs: Vec<(&'static str, std::borrow::Cow<'static, str>)>,
 }
 
 /// Key stored in the aggregation map.
@@ -59,7 +59,7 @@ impl StripedAggMap {
         metric_name: &'static str,
         namespace: &'static [&'static str],
         tags_hash: u64,
-        make_tags: impl FnOnce() -> Vec<(&'static str, String)>,
+        make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
         delta: i64,
     ) {
         let combined = combine_hash(metric_name, tags_hash);
@@ -95,7 +95,7 @@ impl StripedAggMap {
         metric_name: &'static str,
         namespace: &'static [&'static str],
         tags_hash: u64,
-        make_tags: impl FnOnce() -> Vec<(&'static str, String)>,
+        make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
         value: f64,
     ) {
         let combined = combine_hash(metric_name, tags_hash);
@@ -131,7 +131,7 @@ impl StripedAggMap {
         metric_name: &'static str,
         namespace: &'static [&'static str],
         tags_hash: u64,
-        make_tags: impl FnOnce() -> Vec<(&'static str, String)>,
+        make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
         value: f64,
     ) {
         let combined = combine_hash(metric_name, tags_hash);

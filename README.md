@@ -219,7 +219,9 @@ impl Exporter for MyExporter {
         for m in metrics {
             // m.namespace: &[&str]  — e.g., ["http", "auth"]
             // m.metric_name: &str   — e.g., "request_count"
-            // m.tags.pairs: Vec<(&str, String)>
+            // m.tags.pairs: Vec<(&str, Cow<'static, str>)>
+            //   enum tags: Cow::Borrowed (zero alloc)
+            //   string tags: Cow::Owned
             // m.value: FlushedValue
         }
         Ok(())

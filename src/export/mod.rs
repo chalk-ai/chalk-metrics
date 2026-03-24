@@ -18,6 +18,10 @@ pub enum FlushedValue {
 }
 
 /// A single flushed metric with its identity, tags, and aggregated value.
+///
+/// Tag values in `tags.pairs` use `Cow<'static, str>`: enum-constrained tags
+/// are `Cow::Borrowed` (zero allocation), while free-form string tags are
+/// `Cow::Owned`.
 #[derive(Debug)]
 pub struct FlushedMetric {
     /// Namespace path segments (e.g., `["http", "auth"]`). Empty for top-level metrics.
