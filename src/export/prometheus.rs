@@ -133,8 +133,7 @@ impl PrometheusExporter {
 
                         let le_str = format_le(le);
                         if tags_str.is_empty() {
-                            writeln!(out, "{name}_bucket{{le=\"{le_str}\"}} {cumulative}")
-                                .unwrap();
+                            writeln!(out, "{name}_bucket{{le=\"{le_str}\"}} {cumulative}").unwrap();
                         } else {
                             // Insert le into existing tags
                             writeln!(
@@ -333,6 +332,9 @@ mod tests {
             value: FlushedValue::Gauge(0.5),
         }];
         let text = exp.render(&metrics);
-        assert!(text.contains("myapp_http_auth_login_latency 0.5"), "text: {text}");
+        assert!(
+            text.contains("myapp_http_auth_login_latency 0.5"),
+            "text: {text}"
+        );
     }
 }

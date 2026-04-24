@@ -1,51 +1,42 @@
 //! # chalk-metrics
 //!
-//! Efficient metrics aggregation with compile-time code generation and
-//! pluggable exporters.
+//! Efficient metrics aggregation with Rust macro definitions and pluggable
+//! exporters.
 //!
 //! ## Overview
 //!
-//! Define your metrics in a JSON file, generate type-safe Rust code at build
-//! time, then record metrics with zero-allocation hot-path performance. Each
+//! Define your metrics with Rust macros, then record metrics with
+//! zero-allocation hot-path performance. Each
 //! metric is a struct with a `.record()` method that enforces the correct
 //! value type at compile time.
 //!
 //! ## Quick Start
 //!
-//! **1. Define metrics in `metrics.json`:**
+//! **1. Define tags, namespaces, and metrics in Rust:**
 //!
-//! ```json
-//! {
-//!     "tags": {
-//!         "status": { "value_type": "enum", "values": ["success", "failure"], "export_name": "status" },
-//!         "endpoint": { "value_type": "string", "export_name": "endpoint" }
+//! ```rust,ignore
+//! chalk_metrics::define_tags! {
+//!     pub Status => "status" {
+//!         Success => "success",
+//!         Failure => "failure",
 //!     },
-//!     "namespaces": {
-//!         "http": {
-//!             "metrics": [
-//!                 { "name": "request_count", "type": "count", "tags": [{"tag": "endpoint"}, {"tag": "status"}], "description": "Total requests" }
-//!             ]
-//!         }
+//!     pub Endpoint => "endpoint";
+//! }
+//!
+//! chalk_metrics::define_namespaces! {
+//!     pub Http => "http";
+//! }
+//!
+//! chalk_metrics::define_metrics! {
+//!     group(namespace = Http, tags = [Endpoint, Status]) {
+//!         pub count HttpRequestCount => "request_count", "Total requests";
 //!     }
 //! }
 //! ```
 //!
-//! **2. Add to your `build.rs`:**
+//! **2. Initialize and record:**
 //!
 //! ```rust,ignore
-//! fn main() {
-//!     chalk_metrics::codegen::generate("metrics.json");
-//! }
-//! ```
-//!
-//! **3. Include generated code and use:**
-//!
-//! ```rust,ignore
-//! mod metrics {
-//!     include!(concat!(env!("OUT_DIR"), "/metrics_generated.rs"));
-//! }
-//!
-//! use metrics::*;
 //! use chalk_metrics::export::prometheus::PrometheusExporter;
 //!
 //! fn main() {
@@ -54,7 +45,6 @@
 //!         .flush_interval(std::time::Duration::from_secs(10))
 //!         .init();
 //!
-//!     // Type-safe recording — each struct IS the metric
 //!     HttpRequestCount {
 //!         endpoint: Endpoint::from("/api"),
 //!         status: Status::Success,
@@ -62,11 +52,16 @@
 //! }
 //! ```
 
-pub(crate) mod schema;
-pub mod codegen;
-pub mod generated;
+extern crate self as chalk_metrics;
+
+pub use chalk_metrics_macros::{define_metrics, define_namespaces, define_tags};
+
+#[doc(hidden)]
+#[path = "private.rs"]
+pub mod __private;
 pub(crate) mod aggregator;
-pub mod export;
 pub mod client;
-mod worker;
+pub mod export;
+pub mod generated;
 mod macros;
+mod worker;

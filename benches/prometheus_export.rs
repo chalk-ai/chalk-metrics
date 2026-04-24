@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use chalk_metrics::export::prometheus::PrometheusExporter;
 use chalk_metrics::export::{FlushedMetric, FlushedValue, TagsData, UDDSketch};

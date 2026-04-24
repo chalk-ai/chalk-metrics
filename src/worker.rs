@@ -56,10 +56,7 @@ pub(crate) fn spawn_flush_worker(
         .expect("failed to spawn chalk-metrics worker thread")
 }
 
-async fn flush_and_export(
-    aggregator: &StripedAggMap,
-    exporters: &[Box<dyn Exporter>],
-) {
+async fn flush_and_export(aggregator: &StripedAggMap, exporters: &[Box<dyn Exporter>]) {
     let metrics = aggregator.flush();
     if metrics.is_empty() {
         return;

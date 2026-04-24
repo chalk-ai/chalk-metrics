@@ -1,9 +1,51 @@
-#[allow(clippy::vec_init_then_push)]
-mod inner {
-    include!(concat!(env!("OUT_DIR"), "/metrics_generated.rs"));
+crate::define_tags! {
+    pub Status => "status" {
+        Success => "success",
+        Failure => "failure",
+        Timeout => "timeout",
+    }
+
+    pub Endpoint => "endpoint";
+    pub Region => "region";
 }
 
-pub use inner::*;
+crate::define_namespaces! {
+    pub Http => "http";
+    pub Resolver => "resolver";
+    pub HttpAuth(parent = Http) => "auth";
+}
+
+crate::define_metrics! {
+    group(tags = []) {
+        pub gauge Uptime => "uptime", "Process uptime in seconds";
+    }
+
+    group(namespace = Http, tags = [Endpoint, Status]) {
+        pub histogram HttpRequestLatency => "request_latency", "HTTP request latency in seconds";
+        pub count HttpRequestCount => "request_count", "Total number of HTTP requests";
+    }
+
+    group(namespace = Http, tags = [Endpoint]) {
+        pub gauge HttpActiveConnections => "active_connections",
+            "Current number of active connections",
+            tags += [
+                optional Region,
+            ];
+    }
+
+    group(namespace = Resolver, tags = [Endpoint]) {
+        pub histogram ResolverLatency => "latency",
+            "Resolver execution latency in seconds",
+            tags += [
+                Status as resolver_status,
+                optional Endpoint as resolver_fqn,
+            ];
+    }
+
+    group(namespace = HttpAuth, tags = [Endpoint, Status]) {
+        pub count HttpAuthLoginCount => "login_count", "HTTP auth login attempts";
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -18,8 +60,6 @@ mod tests {
         h.finish()
     }
 
-    // Tag type tests
-
     #[test]
     fn test_enum_tag_display() {
         assert_eq!(Status::Success.to_string(), "success");
@@ -33,21 +73,22 @@ mod tests {
         assert_eq!(Endpoint::from(String::from("api/v1")).as_str(), "api/v1");
     }
 
-    // Metric struct tests
-
     #[test]
     fn test_metric_name_and_namespace() {
         assert_eq!(Uptime::NAME, "uptime");
-        assert_eq!(Uptime::NAMESPACE, &[] as &[&str]);
+        assert_eq!(Uptime::namespace(), &[] as &[&str]);
 
         assert_eq!(HttpRequestCount::NAME, "request_count");
-        assert_eq!(HttpRequestCount::NAMESPACE, &["http"]);
+        assert_eq!(HttpRequestCount::namespace(), &["http"]);
 
         assert_eq!(HttpRequestLatency::NAME, "request_latency");
-        assert_eq!(HttpRequestLatency::NAMESPACE, &["http"]);
+        assert_eq!(HttpRequestLatency::namespace(), &["http"]);
 
         assert_eq!(ResolverLatency::NAME, "latency");
-        assert_eq!(ResolverLatency::NAMESPACE, &["resolver"]);
+        assert_eq!(ResolverLatency::namespace(), &["resolver"]);
+
+        assert_eq!(HttpAuthLoginCount::NAME, "login_count");
+        assert_eq!(HttpAuthLoginCount::namespace(), &["http", "auth"]);
     }
 
     #[test]
@@ -85,7 +126,10 @@ mod tests {
             endpoint: Endpoint::from("api/v1"),
             region: Some(Region::from("us-east-1")),
         };
-        assert_eq!(tags_with.export_pairs().len(), 2);
+        let pairs = tags_with.export_pairs();
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[1].0, "region");
+        assert_eq!(pairs[1].1.as_ref(), "us-east-1");
     }
 
     #[test]
@@ -97,6 +141,19 @@ mod tests {
         };
         let pairs = tags.export_pairs();
         assert_eq!(pairs[1].0, "resolver_status");
+        assert_eq!(pairs[1].1.as_ref(), "success");
+    }
+
+    #[test]
+    fn test_optional_alias() {
+        let tags = ResolverLatency {
+            endpoint: Endpoint::from("api/v1"),
+            resolver_status: Status::Success,
+            resolver_fqn: Some(Endpoint::from("resolver.example")),
+        };
+        let pairs = tags.export_pairs();
+        assert_eq!(pairs[2].0, "resolver_fqn");
+        assert_eq!(pairs[2].1.as_ref(), "resolver.example");
     }
 
     #[test]
@@ -108,14 +165,12 @@ mod tests {
 
     #[test]
     fn test_record_count_compiles() {
-        // record() with no arg → increment by 1
         HttpRequestCount {
             endpoint: Endpoint::from("/api"),
             status: Status::Success,
         }
         .record();
 
-        // record_value() with explicit delta
         HttpRequestCount {
             endpoint: Endpoint::from("/api"),
             status: Status::Success,
@@ -139,16 +194,13 @@ mod tests {
 
     #[test]
     fn test_record_macro() {
-        // Count with no value (increment by 1)
         record!(HttpRequestCount {
             endpoint: Endpoint::from("/api"),
             status: Status::Success,
         });
 
-        // Gauge with value
         record!(42.0, Uptime {});
 
-        // Histogram with value
         record!(
             0.042,
             HttpRequestLatency {

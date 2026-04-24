@@ -1,0 +1,5 @@
+error: expected metric type `count`, `gauge`, or `histogram`
+ --> tests/ui/macro_invalid_metric_type.rs:3:13
+  |
+3 |         pub timer BadMetric => "bad_metric", "Bad metric";
+  |             ^^^^^

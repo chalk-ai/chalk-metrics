@@ -1,92 +1,97 @@
 # chalk-metrics
 
-Efficient metrics aggregation with compile-time code generation and pluggable exporters.
+Efficient metrics aggregation with Rust macro definitions and pluggable exporters.
 
-Define your metrics in a JSON file, generate type-safe Rust code at build time, then record metrics with zero-allocation hot-path performance. Each metric is a struct — call `.record()` and the value type is enforced at compile time.
+Define your metrics in Rust macro files, then record metrics with zero-allocation hot-path performance. Each metric is a struct — call `.record()` and the value type is enforced at compile time.
 
 ## Features
 
 - **Type-safe recording**: Each metric is a struct with `.record(value)`. Count metrics accept `i64` (or no arg for +1), gauge/histogram accept `f64`. Wrong type = compile error.
-- **Hierarchical namespaces**: Nest metrics under namespace blocks in JSON. Exporters receive namespace segments and format them (Prometheus uses `_`, StatsD uses `.`).
+- **Hierarchical namespaces**: Define namespace marker types, including optional parent namespaces. Exporters receive namespace segments and format them (Prometheus uses `_`, StatsD uses `.`).
 - **Zero-allocation hot path**: Striped `parking_lot` locks with `hashbrown::RawEntryMut` — only allocates on first-seen tag combinations.
 - **Pluggable exporters**: Prometheus text format and StatsD/DogStatsD included, plus an async `Exporter` trait for custom backends.
 - **Singleton client**: `env_logger`-style `init()`/`try_init()` with automatic shutdown via `atexit`.
 
 ## Quick Start
 
-### 1. Define metrics in `metrics.json`
+### 1. Define metrics in Rust files
 
-```json
-{
-    "tags": {
-        "status": {
-            "value_type": "enum",
-            "values": ["success", "failure"],
-            "export_name": "status"
-        },
-        "endpoint": {
-            "value_type": "string",
-            "export_name": "endpoint"
-        }
-    },
-    "metrics": [
-        {
-            "name": "uptime",
-            "type": "gauge",
-            "tags": [],
-            "description": "Process uptime in seconds"
-        }
-    ],
-    "namespaces": {
-        "http": {
-            "metrics": [
-                {
-                    "name": "request_count",
-                    "type": "count",
-                    "tags": [
-                        { "tag": "endpoint" },
-                        { "tag": "status" }
-                    ],
-                    "description": "Total HTTP requests"
-                },
-                {
-                    "name": "request_latency",
-                    "type": "histogram",
-                    "tags": [
-                        { "tag": "endpoint" },
-                        { "tag": "status" }
-                    ],
-                    "description": "HTTP request latency in seconds"
-                }
-            ]
-        }
+```rust
+// src/metrics/tags.rs
+chalk_metrics::define_tags! {
+    pub Status => "status" {
+        Success => "success",
+        Failure => "failure",
+    }
+
+    pub Endpoint => "endpoint";
+    pub Region => "region";
+}
+```
+
+```rust
+// src/metrics/namespaces.rs
+chalk_metrics::define_namespaces! {
+    pub Http => "http";
+    pub Resolver => "resolver";
+    pub HttpAuth(parent = Http) => "auth";
+}
+```
+
+```rust
+// src/metrics/definitions.rs
+use super::{Endpoint, Http, Region, Resolver, Status};
+
+chalk_metrics::define_metrics! {
+    group(namespace = Http, tags = [Endpoint, Status]) {
+        pub count HttpRequestCount => "request_count", "Total HTTP requests";
+        pub histogram HttpRequestLatency => "request_latency", "HTTP request latency in seconds";
+    }
+
+    group(tags = []) {
+        pub gauge Uptime => "uptime", "Process uptime in seconds";
+    }
+
+    group(namespace = Http, tags = [Endpoint]) {
+        pub gauge HttpActiveConnections => "active_connections",
+            "Current active connections",
+            tags += [
+                optional Region,
+            ];
+    }
+
+    group(namespace = Resolver, tags = [Endpoint]) {
+        pub histogram ResolverLatency => "latency",
+            "Resolver execution latency",
+            tags += [
+                // Uses Status values, but the generated field is
+                // `resolver_status` and exporters receive key "resolver_status".
+                Status as resolver_status,
+
+                // Optional alias: generated field is Option<Endpoint>;
+                // exporters receive key "resolver_fqn" only when Some(...).
+                optional Endpoint as resolver_fqn,
+            ];
     }
 }
 ```
 
-### 2. Set up `build.rs`
-
 ```rust
-fn main() {
-    chalk_metrics::codegen::generate("metrics.json");
-}
+// src/metrics/mod.rs
+mod tags;
+mod namespaces;
+mod definitions;
+
+pub use definitions::*;
+pub use namespaces::*;
+pub use tags::*;
 ```
 
-Add `chalk-metrics` to both `[dependencies]` and `[build-dependencies]` in your `Cargo.toml`.
-
-### 3. Include generated code
-
-```rust
-mod metrics {
-    include!(concat!(env!("OUT_DIR"), "/metrics_generated.rs"));
-}
-```
-
-### 4. Initialize and record
+### 2. Initialize and record
 
 ```rust
 use chalk_metrics::export::prometheus::PrometheusExporter;
-use metrics::*;
+use crate::metrics::*;
 use std::time::Duration;
 
 fn main() {
@@ -117,62 +122,123 @@ fn main() {
 
     // Gauge — f64 value (top-level, no namespace)
     Uptime {}.record(42.0);
+
+    // Optional tags are Option<TagType>
+    HttpActiveConnections {
+        endpoint: Endpoint::from("/api"),
+        region: Some(Region::from("us-east-1")),
+    }.record(12.0);
+
+    HttpActiveConnections {
+        endpoint: Endpoint::from("/api"),
+        region: None,
+    }.record(8.0);
+
+    // Aliased tags use the alias as the struct field and export key
+    ResolverLatency {
+        endpoint: Endpoint::from("my.resolver"),
+        resolver_status: Status::Success,
+        resolver_fqn: Some(Endpoint::from("my.resolver.fqn")),
+    }.record(0.005);
 }
 ```
 
-## JSON Schema Reference
+## Macro Reference
 
-### Tag Definitions
+### Tags
 
 Tags are defined globally and reused across metrics.
 
-| Field | Type | Description |
-|---|---|---|
-| `value_type` | `"enum"` or `"string"` | Whether values are constrained to a fixed set |
-| `values` | `string[]` | Required for enum tags: the allowed values |
-| `export_name` | `string` | Default key name used when exporting. Also used as the struct field name. |
+```rust
+chalk_metrics::define_tags! {
+    // Enum tag: variants are type checked and export borrowed strings.
+    pub Status => "status" {
+        Success => "success",
+        Failure => "failure",
+    }
+
+    // Free-form string tag: accepts Endpoint::from(&str) or Endpoint::from(String).
+    pub Endpoint => "endpoint";
+}
+```
 
 ### Namespaces
 
-Metrics can be organized in hierarchical namespace blocks. Namespaces can be nested arbitrarily deep.
+Metrics can be organized with namespace marker types. Parent namespaces can be declared in the same or a separate `define_namespaces!` invocation as long as the parent type is in scope.
 
-```json
-{
-    "namespaces": {
-        "http": {
-            "metrics": [...],
-            "namespaces": {
-                "auth": {
-                    "metrics": [...]
-                }
-            }
-        }
-    },
-    "metrics": [...]
+```rust
+chalk_metrics::define_namespaces! {
+    pub Http => "http";
+}
+
+chalk_metrics::define_namespaces! {
+    pub HttpAuth(parent = Http) => "auth";
 }
 ```
 
 - Metrics under `http` get namespace `["http"]`
-- Metrics under `http > auth` get namespace `["http", "auth"]`
+- Metrics under `HttpAuth` get namespace `["http", "auth"]`
 - Top-level metrics get namespace `[]`
-- Struct names include the namespace path: `HttpAuthLoginLatency`
 
-### Metric Definitions
+### Metrics
 
-| Field | Type | Description |
-|---|---|---|
-| `name` | `string` | Metric name (snake_case) |
-| `type` | `"count"`, `"gauge"`, or `"histogram"` | Aggregation type |
-| `tags` | `array` | Tag references |
-| `description` | `string` | Human-readable description |
+```rust
+chalk_metrics::define_metrics! {
+    group(namespace = Http, tags = [Endpoint, Status]) {
+        pub count HttpRequestCount => "request_count", "Total HTTP requests";
+        pub histogram HttpRequestLatency => "request_latency", "HTTP request latency";
+    }
 
-### Tag References (per-metric)
+    group(tags = []) {
+        pub gauge Uptime => "uptime", "Process uptime in seconds";
+    }
+}
+```
 
-| Field | Type | Description |
-|---|---|---|
-| `tag` | `string` | Name of the tag definition |
-| `export_name` | `string?` | Override the export key and struct field name |
-| `optional` | `bool` | Whether this tag can be omitted (default: false) |
+- Metric types are `count`, `gauge`, and `histogram`.
+- Group tags are inherited by every metric in the group.
+- Additional per-metric tags are added with `tags += [...]`.
+- Multiple macro calls are supported, so metrics can be split across files or modules.
+- Duplicate Rust type names are caught by Rust. Duplicate exported metric names across separate macro calls are the user's responsibility.
+
+Optional tags are declared with `optional TagType`. The generated struct field is `Option<TagType>`, and the tag is omitted from exports when the value is `None`.
+
+```rust
+chalk_metrics::define_metrics! {
+    group(namespace = Http, tags = [Endpoint]) {
+        pub gauge HttpActiveConnections => "active_connections",
+            "Current active connections",
+            tags += [
+                optional Region,
+            ];
+    }
+}
+```
+
+Tag aliases are declared with `TagType as field_name`. The alias changes the generated field name and exported tag key for that metric only. The tag type and allowed values stay the same.
+
+```rust
+chalk_metrics::define_metrics! {
+    group(namespace = Resolver, tags = [Endpoint]) {
+        pub histogram ResolverLatency => "latency",
+            "Resolver execution latency",
+            tags += [
+                Status as resolver_status,
+                optional Endpoint as resolver_fqn,
+            ];
+    }
+}
+```
+
+Generated metric structs expose `NAME`, `namespace()`, `export_pairs()`, and type-specific recording methods. Count metrics support `.record()` and `.record_value(i64)`. Gauge and histogram metrics support `.record(f64)`.
+
+## Migrating From JSON Codegen
+
+- Remove the `build.rs` call to `chalk_metrics::codegen::generate(...)`.
+- Remove `metrics.json`.
+- Move tag, namespace, and metric definitions into Rust modules using the macros above.
+- Replace `include!(concat!(env!("OUT_DIR"), "/metrics_generated.rs"))` with normal Rust modules and `pub use` re-exports.
+- `chalk-metrics` is only needed in `[dependencies]`; no `[build-dependencies]` entry is required.
 
 ## Exporters
 

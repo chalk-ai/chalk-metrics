@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::net::UdpSocket;
 use std::sync::Arc;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use chalk_metrics::export::statsd::{HistogramExportMode, StatsdExporter};
 use chalk_metrics::export::{Exporter, FlushedMetric, FlushedValue, TagsData, UDDSketch};
@@ -102,9 +102,7 @@ fn statsd_benchmarks(c: &mut Criterion) {
                 let (port, _drain) = setup_drain_socket();
                 let exporter = StatsdExporter::udp(format!("127.0.0.1:{port}"))
                     .namespace("myapp")
-                    .histogram_mode(HistogramExportMode::Percentiles(vec![
-                        0.5, 0.9, 0.95, 0.99,
-                    ]))
+                    .histogram_mode(HistogramExportMode::Percentiles(vec![0.5, 0.9, 0.95, 0.99]))
                     .build()
                     .unwrap();
                 let metrics = make_mixed_batch(size);

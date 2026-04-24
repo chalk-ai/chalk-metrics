@@ -102,9 +102,7 @@ impl MetricsClientBuilder {
     /// Try to initialize the global metrics client singleton.
     pub fn try_init(self) -> Result<(), AlreadyInitializedError> {
         let client = self.build_inner();
-        GLOBAL
-            .set(client)
-            .map_err(|_| AlreadyInitializedError)?;
+        GLOBAL.set(client).map_err(|_| AlreadyInitializedError)?;
 
         unsafe {
             libc::atexit(atexit_handler);
@@ -292,7 +290,9 @@ mod tests {
 
     #[test]
     fn test_local_client_record_and_flush() {
-        let client = builder().flush_interval(Duration::from_secs(60)).build_local();
+        let client = builder()
+            .flush_interval(Duration::from_secs(60))
+            .build_local();
 
         client.record_count("test_count", &[], 100, || vec![("k", "v".into())], 5);
         client.record_gauge("test_gauge", &[], 200, || vec![], 42.0);
@@ -331,7 +331,9 @@ mod tests {
 
     #[test]
     fn test_shutdown_is_idempotent() {
-        let client = builder().flush_interval(Duration::from_secs(60)).build_local();
+        let client = builder()
+            .flush_interval(Duration::from_secs(60))
+            .build_local();
         client.shutdown();
         client.shutdown();
     }

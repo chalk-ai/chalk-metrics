@@ -1,5 +1,5 @@
-// Macros are no longer the primary recording API.
-// Each generated metric struct has a .record() method with the correct value type.
+// Metric definition macros are exported from chalk-metrics-macros.
+// Each macro-generated metric struct has a .record() method with the correct value type.
 // This module is kept for the optional convenience macro below.
 
 /// Convenience macro for recording a metric value.
@@ -14,9 +14,6 @@
 ///
 /// // Count (defaults to increment by 1):
 /// chalk_metrics::record!(HttpRequestCount { endpoint: Endpoint::from("/api"), status: Status::Success });
-///
-/// // Count with explicit delta:
-/// chalk_metrics::record!(5, HttpRequestCount { endpoint: Endpoint::from("/api"), status: Status::Success });
 ///
 /// // Gauge/Histogram (requires value):
 /// chalk_metrics::record!(0.042, HttpRequestLatency { endpoint: Endpoint::from("/api"), status: Status::Success });

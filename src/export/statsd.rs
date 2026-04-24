@@ -210,9 +210,7 @@ impl StatsdExporter {
 
             for line in lines {
                 // If adding this line would exceed buffer size, flush first
-                if !buffer.is_empty()
-                    && buffer.len() + 1 + line.len() > self.max_buffer_size
-                {
+                if !buffer.is_empty() && buffer.len() + 1 + line.len() > self.max_buffer_size {
                     self.send_buffer(&buffer)?;
                     buffer.clear();
                 }
@@ -330,8 +328,7 @@ mod tests {
             let tags = if all_tags.is_empty() {
                 String::new()
             } else {
-                let inner: Vec<String> =
-                    all_tags.iter().map(|(k, v)| format!("{k}:{v}")).collect();
+                let inner: Vec<String> = all_tags.iter().map(|(k, v)| format!("{k}:{v}")).collect();
                 format!("|#{}", inner.join(","))
             };
 
