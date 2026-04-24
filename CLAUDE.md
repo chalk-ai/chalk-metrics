@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-`chalk-metrics` is a Rust library crate (edition 2024) for efficient metrics aggregation with compile-time code generation and pluggable exporters.
+`chalk-metrics` is a Rust workspace (edition 2024) for efficient metrics aggregation with macro-defined metrics and pluggable exporters.
 
 ## Commands
 
@@ -23,21 +23,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Architecture
 
-### Code Generation Pipeline
-- Users define metrics in a JSON file with hierarchical namespaces (see `metrics.json`)
-- `src/codegen.rs` exposes `generate(path)` (for external crates) and `generate_with_crate_path(path, crate_path)` (for internal use)
-- Called from `build.rs` at compile time → generates `metrics_generated.rs` in `OUT_DIR`
-- Each metric becomes a struct (e.g., `HttpRequestCount`) with a `.record()` method
+### Macro Definition Pipeline
+- Users define tags with `define_tags!`, namespaces with `define_namespaces!`, and metrics with `define_metrics!`
+- `chalk-metrics-macros` contains the proc macro implementation and is re-exported by `chalk_metrics`
+- Macro definitions can be split across multiple files/modules and multiple macro invocations
+- Each metric expands to a struct (e.g., `HttpRequestCount`) with a `.record()` method
 - Count metrics: `.record()` (increment by 1) and `.record_value(i64)`
 - Gauge/Histogram metrics: `.record(f64)`
 - The struct IS the metric identity — no separate MetricId enum
-- `src/schema.rs` defines the JSON schema serde types, namespace tree, and validation
+- `src/private.rs` defines hidden support traits for generated tags and namespace marker types
 
 ### Recording API (Type-Safe)
-- Each generated struct has `.record()` with the correct value type enforced at compile time
-- Struct field names come from the tag's `export_name` (from JSON)
-- Structs are namespace-prefixed for uniqueness: `HttpAuthLoginLatency` for `http > auth > login_latency`
-- Associated consts `NAME` and `NAMESPACE` on each struct provide metric identity
+- Each macro-generated struct has `.record()` with the correct value type enforced at compile time
+- Struct field names default to the tag type's snake_case name, or use `Tag as field_name` aliases
+- Optional tags are declared as `optional TagType` and generate `Option<TagType>` fields
+- Associated const `NAME` and method `namespace()` provide metric identity
 
 ### Aggregation
 - `src/aggregator/striped_map.rs` — 64-stripe concurrent map using `parking_lot::Mutex` and `hashbrown::RawEntryMut`
@@ -59,6 +59,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Tag Values
 - Tag values use `Cow<'static, str>` — enum tags are `Cow::Borrowed(&'static str)` (zero allocation), string tags are `Cow::Owned(String)`
 - `TagsData.pairs` is `Vec<(&'static str, Cow<'static, str>)>`
+- Aliased tags use the alias identifier as both the struct field name and export key for that metric
 
 ### Flush Behavior
 - Counts and histograms are drained from the map on flush

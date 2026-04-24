@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use chalk_metrics::client;
 
@@ -16,9 +16,15 @@ fn make_local_client() -> client::MetricsClient {
 }
 
 /// 80 tag combinations: 16 shards x 5 endpoints
-fn mixed_tags_pool() -> Vec<(u64, Box<dyn Fn() -> Vec<(&'static str, Cow<'static, str>)> + Send + Sync>)> {
+fn mixed_tags_pool() -> Vec<(
+    u64,
+    Box<dyn Fn() -> Vec<(&'static str, Cow<'static, str>)> + Send + Sync>,
+)> {
     let endpoints = ["api/v1", "api/v2", "health", "metrics", "graphql"];
-    let mut pool: Vec<(u64, Box<dyn Fn() -> Vec<(&'static str, Cow<'static, str>)> + Send + Sync>)> = Vec::new();
+    let mut pool: Vec<(
+        u64,
+        Box<dyn Fn() -> Vec<(&'static str, Cow<'static, str>)> + Send + Sync>,
+    )> = Vec::new();
 
     for shard in 0..16u64 {
         for &ep in &endpoints {
@@ -91,12 +97,18 @@ fn single_thread_benchmarks(c: &mut Criterion) {
         let local = make_local_client();
         b.iter(|| {
             for _ in 0..OPS_PER_ITER {
-                local.record_count("request_count", &["http"], 42, || {
-                    vec![
-                        ("endpoint", Cow::Borrowed("api/v1")),
-                        ("status", Cow::Borrowed("success")),
-                    ]
-                }, 1);
+                local.record_count(
+                    "request_count",
+                    &["http"],
+                    42,
+                    || {
+                        vec![
+                            ("endpoint", Cow::Borrowed("api/v1")),
+                            ("status", Cow::Borrowed("success")),
+                        ]
+                    },
+                    1,
+                );
             }
         });
         local.flush();
@@ -120,9 +132,13 @@ fn single_thread_benchmarks(c: &mut Criterion) {
         let local = make_local_client();
         b.iter(|| {
             for _ in 0..OPS_PER_ITER {
-                local.record_gauge("active_connections", &["http"], 42, || {
-                    vec![("endpoint", Cow::Borrowed("api/v1"))]
-                }, 100.0);
+                local.record_gauge(
+                    "active_connections",
+                    &["http"],
+                    42,
+                    || vec![("endpoint", Cow::Borrowed("api/v1"))],
+                    100.0,
+                );
             }
         });
         local.flush();
@@ -146,12 +162,18 @@ fn single_thread_benchmarks(c: &mut Criterion) {
         let local = make_local_client();
         b.iter(|| {
             for i in 0..OPS_PER_ITER {
-                local.record_histogram("request_latency", &["http"], 42, || {
-                    vec![
-                        ("endpoint", Cow::Borrowed("api/v1")),
-                        ("status", Cow::Borrowed("success")),
-                    ]
-                }, i as f64 * 0.001);
+                local.record_histogram(
+                    "request_latency",
+                    &["http"],
+                    42,
+                    || {
+                        vec![
+                            ("endpoint", Cow::Borrowed("api/v1")),
+                            ("status", Cow::Borrowed("success")),
+                        ]
+                    },
+                    i as f64 * 0.001,
+                );
             }
         });
         local.flush();
@@ -164,7 +186,13 @@ fn single_thread_benchmarks(c: &mut Criterion) {
         b.iter(|| {
             for i in 0..OPS_PER_ITER as usize {
                 let (hash, make_tags) = &pool[i % pool.len()];
-                local.record_histogram("request_latency", &["http"], *hash, make_tags, i as f64 * 0.001);
+                local.record_histogram(
+                    "request_latency",
+                    &["http"],
+                    *hash,
+                    make_tags,
+                    i as f64 * 0.001,
+                );
             }
         });
         local.flush();
@@ -221,7 +249,13 @@ fn contention_benchmarks(c: &mut Criterion) {
                             let ops_per_thread = CONTENTION_OPS as usize / num_threads;
                             let idx = (t * ops_per_thread + i) % pool.len();
                             let (hash, make_tags) = &pool[idx];
-                            local.record_histogram("request_latency", &["http"], *hash, make_tags, i as f64 * 0.001);
+                            local.record_histogram(
+                                "request_latency",
+                                &["http"],
+                                *hash,
+                                make_tags,
+                                i as f64 * 0.001,
+                            );
                         })
                     };
                     let d = run_contended(num_threads, iters, op);

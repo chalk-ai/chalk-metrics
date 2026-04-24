@@ -382,9 +382,7 @@ impl UDDSketch {
         match bucket {
             SketchHashKey::Zero => 0.0,
             SketchHashKey::Positive(i) => self.gamma.powf(i as f64 - 1.0) * (1.0 + self.alpha),
-            SketchHashKey::Negative(i) => {
-                -(self.gamma.powf(i as f64 - 1.0) * (1.0 + self.alpha))
-            }
+            SketchHashKey::Negative(i) => -(self.gamma.powf(i as f64 - 1.0) * (1.0 + self.alpha)),
             SketchHashKey::Invalid => panic!("Cannot convert invalid bucket to value"),
         }
     }

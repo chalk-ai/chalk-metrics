@@ -208,8 +208,8 @@ impl StripedAggMap {
 }
 
 /// Use the static string pointer as part of the hash key. Since metric names
-/// are `&'static str` from generated code, identical strings share the same
-/// address, making this an O(1) identity check.
+/// are `&'static str` from macro-generated code, identical strings share the
+/// same address, making this an O(1) identity check.
 #[inline]
 fn combine_hash(metric_name: &'static str, tags_hash: u64) -> u64 {
     let name_hash = metric_name.as_ptr() as u64;

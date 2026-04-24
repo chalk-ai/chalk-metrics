@@ -40,25 +40,46 @@ fn test_full_pipeline_with_prometheus() {
         .flush_interval(Duration::from_secs(60))
         .build_local();
 
-    local.record_count("request_count", &["http"], 0, || {
-        vec![("endpoint", "/api".into()), ("status", "success".into())]
-    }, 10);
+    local.record_count(
+        "request_count",
+        &["http"],
+        0,
+        || vec![("endpoint", "/api".into()), ("status", "success".into())],
+        10,
+    );
 
-    local.record_gauge("active_connections", &["http"], 1, || {
-        vec![("endpoint", "/api".into())]
-    }, 42.0);
+    local.record_gauge(
+        "active_connections",
+        &["http"],
+        1,
+        || vec![("endpoint", "/api".into())],
+        42.0,
+    );
 
-    local.record_histogram("request_latency", &["http"], 2, || {
-        vec![("endpoint", "/api".into()), ("status", "success".into())]
-    }, 0.5);
+    local.record_histogram(
+        "request_latency",
+        &["http"],
+        2,
+        || vec![("endpoint", "/api".into()), ("status", "success".into())],
+        0.5,
+    );
 
     let flushed = local.flush();
     assert_eq!(flushed.len(), 3);
 
     let text = prom.render_metrics(&flushed);
-    assert!(text.contains("test_http_request_count_total"), "text: {text}");
-    assert!(text.contains("test_http_active_connections"), "text: {text}");
-    assert!(text.contains("test_http_request_latency_bucket"), "text: {text}");
+    assert!(
+        text.contains("test_http_request_count_total"),
+        "text: {text}"
+    );
+    assert!(
+        text.contains("test_http_active_connections"),
+        "text: {text}"
+    );
+    assert!(
+        text.contains("test_http_request_latency_bucket"),
+        "text: {text}"
+    );
 
     local.shutdown();
 }
@@ -165,7 +186,10 @@ fn test_namespace_in_flushed_metrics() {
     let flushed = local.flush();
     assert_eq!(flushed.len(), 2);
 
-    let namespaced = flushed.iter().find(|m| m.metric_name == "request_count").unwrap();
+    let namespaced = flushed
+        .iter()
+        .find(|m| m.metric_name == "request_count")
+        .unwrap();
     assert_eq!(namespaced.namespace, &["http"]);
 
     let top_level = flushed.iter().find(|m| m.metric_name == "uptime").unwrap();
