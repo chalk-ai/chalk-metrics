@@ -6,7 +6,7 @@ use parking_lot::Mutex;
 use super::count::CountSlot;
 use super::gauge::GaugeSlot;
 use super::histogram::HistogramSlot;
-use crate::export::{FlushedMetric, FlushedValue};
+use crate::export::{FlushedMetric, FlushedValue, RawDistributionPoint};
 
 const STRIPE_COUNT: usize = 64;
 const STRIPE_MASK: usize = 63;

@@ -31,6 +31,20 @@ pub struct FlushedMetric {
     pub value: FlushedValue,
 }
 
+/// A single raw histogram value recorded when `aggregate_distr_metrics(false)`
+/// is set on the client, bypassing sketch aggregation for this data point.
+///
+/// `tags` is the same `Arc<TagsData>` cached by the striped aggregation map
+/// for this metric's key, so producing one of these does not allocate beyond
+/// the first-seen tag combination.
+#[derive(Debug)]
+pub struct RawDistributionPoint {
+    pub namespace: &'static [&'static str],
+    pub metric_name: &'static str,
+    pub tags: Arc<TagsData>,
+    pub value: f64,
+}
+
 /// Error returned by exporters.
 #[derive(Debug)]
 pub struct ExportError {
