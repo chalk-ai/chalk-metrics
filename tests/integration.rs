@@ -3,7 +3,9 @@ use std::time::Duration;
 
 use chalk_metrics::client;
 use chalk_metrics::export::prometheus::PrometheusExporter;
-use chalk_metrics::export::{ExportError, Exporter, FlushedMetric, FlushedValue};
+use chalk_metrics::export::{
+    ExportError, Exporter, FlushedMetric, FlushedValue, RawDistributionPoint,
+};
 
 use parking_lot::Mutex;
 
@@ -172,6 +174,62 @@ fn test_histogram_quantile_accuracy() {
     }
 
     local.shutdown();
+}
+
+struct RawAndAggregateCollectingExporter {
+    raw_values: Arc<Mutex<Vec<f64>>>,
+    histogram_counts: Arc<Mutex<Vec<u64>>>,
+}
+
+#[async_trait::async_trait]
+impl Exporter for RawAndAggregateCollectingExporter {
+    async fn export(&self, metrics: &[FlushedMetric]) -> Result<(), ExportError> {
+        for m in metrics {
+            if let FlushedValue::Histogram(sketch) = &m.value {
+                self.histogram_counts.lock().push(sketch.count());
+            }
+        }
+        Ok(())
+    }
+
+    async fn export_raw_points(&self, points: &[RawDistributionPoint]) -> Result<(), ExportError> {
+        let mut raw = self.raw_values.lock();
+        for p in points {
+            raw.push(p.value);
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn test_histogram_passthrough_end_to_end() {
+    let raw_values = Arc::new(Mutex::new(Vec::new()));
+    let histogram_counts = Arc::new(Mutex::new(Vec::new()));
+    let exporter = RawAndAggregateCollectingExporter {
+        raw_values: Arc::clone(&raw_values),
+        histogram_counts: Arc::clone(&histogram_counts),
+    };
+
+    let local = client::builder()
+        .with_exporter(exporter)
+        .flush_interval(Duration::from_millis(50))
+        .aggregate_distr_metrics(false)
+        .build_local();
+
+    let expected = vec![10.0, 20.0, 30.0, 40.0, 50.0];
+    for &v in &expected {
+        local.record_histogram("latency", &[], 0, || vec![], v);
+    }
+
+    std::thread::sleep(Duration::from_millis(200));
+    local.shutdown();
+
+    let mut received_raw = raw_values.lock().clone();
+    received_raw.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(received_raw, expected);
+
+    // Passthrough bypasses the sketch entirely, so nothing is ever aggregated.
+    assert!(histogram_counts.lock().is_empty());
 }
 
 #[test]

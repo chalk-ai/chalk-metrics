@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 
-use super::{ExportError, Exporter, FlushedMetric, FlushedValue};
+use super::{ExportError, Exporter, FlushedMetric, FlushedValue, RawDistributionPoint};
 
 /// How histogram (UDD Sketch) data should be emitted over StatsD.
 #[derive(Debug, Clone)]
@@ -47,6 +47,7 @@ pub struct StatsdExporter {
     default_tags: Vec<(String, String)>,
     histogram_mode: HistogramExportMode,
     max_buffer_size: usize,
+    buffer: Mutex<String>,
 }
 
 /// Builder for [`StatsdExporter`].
@@ -116,6 +117,7 @@ impl StatsdExporterBuilder {
             default_tags: self.default_tags,
             histogram_mode: self.histogram_mode,
             max_buffer_size: self.max_buffer_size,
+            buffer: Mutex::new(String::with_capacity(self.max_buffer_size)),
         })
     }
 }
@@ -173,13 +175,11 @@ impl StatsdExporter {
 
     /// Format all metrics into batched DogStatsD datagrams and send them.
     fn send_metrics(&self, metrics: &[FlushedMetric]) -> Result<(), ExportError> {
-        let mut buffer = String::with_capacity(self.max_buffer_size);
+        let mut lines = Vec::new();
 
         for metric in metrics {
             let name = self.full_name(metric.namespace, metric.metric_name);
             let tags = self.format_tags(&metric.tags.pairs);
-
-            let mut lines = Vec::new();
 
             match &metric.value {
                 FlushedValue::Count(value) => {
@@ -190,9 +190,7 @@ impl StatsdExporter {
                 }
                 FlushedValue::Histogram(sketch) => match &self.histogram_mode {
                     HistogramExportMode::Distribution => {
-                        // Emit the mean as a distribution value
-                        let mean = sketch.mean();
-                        lines.push(format!("{name}:{mean}|d{tags}"));
+                        lines.push(format_distribution_line(&name, sketch.mean(), &tags));
                     }
                     HistogramExportMode::Percentiles(percentiles) => {
                         let count = sketch.count();
@@ -207,18 +205,34 @@ impl StatsdExporter {
                     }
                 },
             }
+        }
 
-            for line in lines {
-                // If adding this line would exceed buffer size, flush first
-                if !buffer.is_empty() && buffer.len() + 1 + line.len() > self.max_buffer_size {
-                    self.send_buffer(&buffer)?;
-                    buffer.clear();
-                }
-                if !buffer.is_empty() {
-                    buffer.push('\n');
-                }
-                buffer.push_str(&line);
+        self.send_lines(lines)
+    }
+
+    /// Format raw distribution points into batched DogStatsD datagrams and send them.
+    fn send_raw_points(&self, points: &[RawDistributionPoint]) -> Result<(), ExportError> {
+        let lines = points.iter().map(|point| {
+            let name = self.full_name(point.namespace, point.metric_name);
+            let tags = self.format_tags(&point.tags.pairs);
+            format_distribution_line(&name, point.value, &tags)
+        });
+        self.send_lines(lines)
+    }
+
+    fn send_lines(&self, lines: impl IntoIterator<Item = String>) -> Result<(), ExportError> {
+        let mut buffer = self.buffer.lock();
+        buffer.clear();
+
+        for line in lines {
+            if !buffer.is_empty() && buffer.len() + 1 + line.len() > self.max_buffer_size {
+                self.send_buffer(&buffer)?;
+                buffer.clear();
             }
+            if !buffer.is_empty() {
+                buffer.push('\n');
+            }
+            buffer.push_str(&line);
         }
 
         if !buffer.is_empty() {
@@ -261,6 +275,10 @@ impl StatsdExporter {
     }
 }
 
+fn format_distribution_line(name: &str, value: f64, tags: &str) -> String {
+    format!("{name}:{value}|d{tags}")
+}
+
 /// Format a percentile value as a label (e.g., 0.5 -> "p50", 0.99 -> "p99").
 fn format_percentile_label(p: f64) -> String {
     let pct = (p * 100.0).round() as u32;
@@ -286,6 +304,10 @@ fn get_inode(path: &Path) -> io::Result<u64> {
 impl Exporter for StatsdExporter {
     async fn export(&self, metrics: &[FlushedMetric]) -> Result<(), ExportError> {
         self.send_metrics(metrics)
+    }
+
+    async fn export_raw_points(&self, points: &[RawDistributionPoint]) -> Result<(), ExportError> {
+        self.send_raw_points(points)
     }
 }
 
@@ -509,5 +531,62 @@ mod tests {
     fn test_udp_exporter_creates() {
         // Just verify the builder compiles and creates a socket
         let _exp = StatsdExporter::udp("127.0.0.1:18125").build().unwrap();
+    }
+
+    #[test]
+    fn test_send_raw_points_single_point() {
+        let listener = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        listener
+            .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let exp = StatsdExporter::udp(addr.to_string()).build().unwrap();
+
+        let points = vec![RawDistributionPoint {
+            namespace: &[],
+            metric_name: "latency",
+            tags: make_tags(vec![]),
+            value: 42.0,
+        }];
+        exp.send_raw_points(&points).unwrap();
+
+        let mut buf = [0u8; 2048];
+        let (n, _) = listener.recv_from(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"latency:42|d");
+    }
+
+    #[test]
+    fn test_send_raw_points_batches_into_multiple_datagrams() {
+        let listener = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        listener
+            .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let exp = StatsdExporter::udp(addr.to_string())
+            .max_buffer_size(64)
+            .build()
+            .unwrap();
+
+        let points: Vec<RawDistributionPoint> = (0..20)
+            .map(|i| RawDistributionPoint {
+                namespace: &[],
+                metric_name: "some_long_latency_metric_name",
+                tags: make_tags(vec![]),
+                value: i as f64,
+            })
+            .collect();
+        exp.send_raw_points(&points).unwrap();
+
+        let mut datagram_count = 0;
+        let mut buf = [0u8; 2048];
+        while listener.recv_from(&mut buf).is_ok() {
+            datagram_count += 1;
+        }
+        assert!(
+            datagram_count > 1,
+            "expected points to split across multiple datagrams, got {datagram_count}"
+        );
     }
 }
