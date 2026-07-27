@@ -228,8 +228,8 @@ fn test_histogram_passthrough_end_to_end() {
     received_raw.sort_by(|a, b| a.partial_cmp(b).unwrap());
     assert_eq!(received_raw, expected);
 
-    let total_aggregated_count: u64 = histogram_counts.lock().iter().sum();
-    assert_eq!(total_aggregated_count, expected.len() as u64);
+    // Passthrough bypasses the sketch entirely, so nothing is ever aggregated.
+    assert!(histogram_counts.lock().is_empty());
 }
 
 #[test]

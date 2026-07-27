@@ -150,14 +150,18 @@ impl StripedAggMap {
 
         let tags_data = match entry {
             hashbrown::hash_map::RawEntryMut::Occupied(e) => {
-                if let AggSlot::Histogram(ref slot) = e.get().1 {
+                if self.raw_sender.is_none()
+                    && let AggSlot::Histogram(ref slot) = e.get().1
+                {
                     slot.record(value);
                 }
                 Arc::clone(&e.get().0.tags_data)
             }
             hashbrown::hash_map::RawEntryMut::Vacant(e) => {
                 let slot = HistogramSlot::new(self.max_buckets, self.initial_error);
-                slot.record(value);
+                if self.raw_sender.is_none() {
+                    slot.record(value);
+                }
                 let tags_data = Arc::new(TagsData { pairs: make_tags() });
                 let key = AggKey {
                     namespace,
@@ -324,19 +328,16 @@ mod tests {
     }
 
     #[test]
-    fn test_histogram_passthrough_sends_raw_point_and_still_aggregates() {
+    fn test_histogram_passthrough_sends_raw_points_without_aggregating() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let map = StripedAggMap::new(200, 0.001, Some(tx));
 
         map.record_histogram("test_hist", &[], 789, || vec![("k", "v".into())], 1.0);
         map.record_histogram("test_hist", &[], 789, || panic!("should not call"), 2.0);
 
+        // The sketch is bypassed entirely in passthrough mode, so flush() has nothing to emit.
         let flushed = map.flush();
-        assert_eq!(flushed.len(), 1);
-        match &flushed[0].value {
-            FlushedValue::Histogram(sketch) => assert_eq!(sketch.count(), 2),
-            _ => panic!("expected histogram"),
-        }
+        assert_eq!(flushed.len(), 0);
 
         let point1 = rx.try_recv().expect("expected first raw point");
         let point2 = rx.try_recv().expect("expected second raw point");
@@ -347,7 +348,6 @@ mod tests {
         assert_eq!(point1.metric_name, "test_hist");
 
         assert!(Arc::ptr_eq(&point1.tags, &point2.tags));
-        assert!(Arc::ptr_eq(&point1.tags, &flushed[0].tags));
     }
 
     #[test]
