@@ -173,13 +173,11 @@ impl StatsdExporter {
 
     /// Format all metrics into batched DogStatsD datagrams and send them.
     fn send_metrics(&self, metrics: &[FlushedMetric]) -> Result<(), ExportError> {
-        let mut buffer = String::with_capacity(self.max_buffer_size);
+        let mut lines = Vec::new();
 
         for metric in metrics {
             let name = self.full_name(metric.namespace, metric.metric_name);
             let tags = self.format_tags(&metric.tags.pairs);
-
-            let mut lines = Vec::new();
 
             match &metric.value {
                 FlushedValue::Count(value) => {
@@ -205,36 +203,25 @@ impl StatsdExporter {
                     }
                 },
             }
-
-            for line in lines {
-                // If adding this line would exceed buffer size, flush first
-                if !buffer.is_empty() && buffer.len() + 1 + line.len() > self.max_buffer_size {
-                    self.send_buffer(&buffer)?;
-                    buffer.clear();
-                }
-                if !buffer.is_empty() {
-                    buffer.push('\n');
-                }
-                buffer.push_str(&line);
-            }
         }
 
-        if !buffer.is_empty() {
-            self.send_buffer(&buffer)?;
-        }
-
-        Ok(())
+        self.send_lines(lines)
     }
 
     /// Format raw distribution points into batched DogStatsD datagrams and send them.
     fn send_raw_points(&self, points: &[RawDistributionPoint]) -> Result<(), ExportError> {
-        let mut buffer = String::with_capacity(self.max_buffer_size);
-
-        for point in points {
+        let lines = points.iter().map(|point| {
             let name = self.full_name(point.namespace, point.metric_name);
             let tags = self.format_tags(&point.tags.pairs);
-            let line = format_distribution_line(&name, point.value, &tags);
+            format_distribution_line(&name, point.value, &tags)
+        });
+        self.send_lines(lines)
+    }
 
+    fn send_lines(&self, lines: impl IntoIterator<Item = String>) -> Result<(), ExportError> {
+        let mut buffer = String::with_capacity(self.max_buffer_size);
+
+        for line in lines {
             if !buffer.is_empty() && buffer.len() + 1 + line.len() > self.max_buffer_size {
                 self.send_buffer(&buffer)?;
                 buffer.clear();
