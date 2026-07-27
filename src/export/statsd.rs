@@ -542,4 +542,61 @@ mod tests {
         // Just verify the builder compiles and creates a socket
         let _exp = StatsdExporter::udp("127.0.0.1:18125").build().unwrap();
     }
+
+    #[test]
+    fn test_send_raw_points_single_point() {
+        let listener = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        listener
+            .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let exp = StatsdExporter::udp(addr.to_string()).build().unwrap();
+
+        let points = vec![RawDistributionPoint {
+            namespace: &[],
+            metric_name: "latency",
+            tags: make_tags(vec![]),
+            value: 42.0,
+        }];
+        exp.send_raw_points(&points).unwrap();
+
+        let mut buf = [0u8; 2048];
+        let (n, _) = listener.recv_from(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"latency:42|d");
+    }
+
+    #[test]
+    fn test_send_raw_points_batches_into_multiple_datagrams() {
+        let listener = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        listener
+            .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let exp = StatsdExporter::udp(addr.to_string())
+            .max_buffer_size(64)
+            .build()
+            .unwrap();
+
+        let points: Vec<RawDistributionPoint> = (0..20)
+            .map(|i| RawDistributionPoint {
+                namespace: &[],
+                metric_name: "some_long_latency_metric_name",
+                tags: make_tags(vec![]),
+                value: i as f64,
+            })
+            .collect();
+        exp.send_raw_points(&points).unwrap();
+
+        let mut datagram_count = 0;
+        let mut buf = [0u8; 2048];
+        while listener.recv_from(&mut buf).is_ok() {
+            datagram_count += 1;
+        }
+        assert!(
+            datagram_count > 1,
+            "expected points to split across multiple datagrams, got {datagram_count}"
+        );
+    }
 }

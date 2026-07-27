@@ -346,6 +346,64 @@ mod tests {
         client.shutdown();
     }
 
+    struct RawPointCountingExporter {
+        raw_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Exporter for RawPointCountingExporter {
+        async fn export(&self, _metrics: &[FlushedMetric]) -> Result<(), ExportError> {
+            Ok(())
+        }
+
+        async fn export_raw_points(
+            &self,
+            points: &[crate::export::RawDistributionPoint],
+        ) -> Result<(), ExportError> {
+            self.raw_count.fetch_add(points.len(), Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_aggregate_distr_metrics_false_wires_raw_channel() {
+        let raw_count = Arc::new(AtomicUsize::new(0));
+        let exporter = RawPointCountingExporter {
+            raw_count: Arc::clone(&raw_count),
+        };
+
+        let client = builder()
+            .with_exporter(exporter)
+            .flush_interval(Duration::from_millis(50))
+            .aggregate_distr_metrics(false)
+            .build_local();
+
+        client.record_histogram("h", &[], 100, || vec![], 1.0);
+
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(raw_count.load(Ordering::Relaxed) > 0);
+        client.shutdown();
+    }
+
+    #[test]
+    fn test_aggregate_distr_metrics_default_does_not_wire_raw_channel() {
+        let raw_count = Arc::new(AtomicUsize::new(0));
+        let exporter = RawPointCountingExporter {
+            raw_count: Arc::clone(&raw_count),
+        };
+
+        let client = builder()
+            .with_exporter(exporter)
+            .flush_interval(Duration::from_millis(50))
+            .build_local();
+
+        client.record_histogram("h", &[], 100, || vec![], 1.0);
+
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(raw_count.load(Ordering::Relaxed), 0);
+        client.shutdown();
+    }
+
     #[test]
     fn test_noop_when_not_initialized() {
         record_count("noop", &[], 0, || vec![], 1);

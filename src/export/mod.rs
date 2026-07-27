@@ -114,3 +114,24 @@ pub trait Exporter: Send + Sync {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct ExportOnlyExporter;
+
+    #[async_trait::async_trait]
+    impl Exporter for ExportOnlyExporter {
+        async fn export(&self, _metrics: &[FlushedMetric]) -> Result<(), ExportError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_default_export_raw_points_is_noop() {
+        let exporter = ExportOnlyExporter;
+        let points: Vec<RawDistributionPoint> = Vec::new();
+        assert!(exporter.export_raw_points(&points).await.is_ok());
+    }
+}

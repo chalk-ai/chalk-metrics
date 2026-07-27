@@ -324,6 +324,40 @@ mod tests {
     }
 
     #[test]
+    fn test_histogram_passthrough_sends_raw_point_and_still_aggregates() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let map = StripedAggMap::new(200, 0.001, Some(tx));
+
+        map.record_histogram("test_hist", &[], 789, || vec![("k", "v".into())], 1.0);
+        map.record_histogram("test_hist", &[], 789, || panic!("should not call"), 2.0);
+
+        let flushed = map.flush();
+        assert_eq!(flushed.len(), 1);
+        match &flushed[0].value {
+            FlushedValue::Histogram(sketch) => assert_eq!(sketch.count(), 2),
+            _ => panic!("expected histogram"),
+        }
+
+        let point1 = rx.try_recv().expect("expected first raw point");
+        let point2 = rx.try_recv().expect("expected second raw point");
+        assert!(rx.try_recv().is_err());
+
+        assert_eq!(point1.value, 1.0);
+        assert_eq!(point2.value, 2.0);
+        assert_eq!(point1.metric_name, "test_hist");
+
+        assert!(Arc::ptr_eq(&point1.tags, &point2.tags));
+        assert!(Arc::ptr_eq(&point1.tags, &flushed[0].tags));
+    }
+
+    #[test]
+    fn test_histogram_without_raw_sender_sends_nothing() {
+        let map = make_map();
+        map.record_histogram("test_hist", &[], 789, || vec![], 1.0);
+        assert!(map.raw_sender.is_none());
+    }
+
+    #[test]
     fn test_concurrent_same_key() {
         use std::sync::Arc;
         use std::thread;

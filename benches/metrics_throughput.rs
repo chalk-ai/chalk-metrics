@@ -15,6 +15,13 @@ fn make_local_client() -> client::MetricsClient {
         .build_local()
 }
 
+fn make_local_client_with_passthrough() -> client::MetricsClient {
+    client::builder()
+        .flush_interval(Duration::from_secs(3600))
+        .aggregate_distr_metrics(false)
+        .build_local()
+}
+
 /// 80 tag combinations: 16 shards x 5 endpoints
 fn mixed_tags_pool() -> Vec<(
     u64,
@@ -191,6 +198,28 @@ fn single_thread_benchmarks(c: &mut Criterion) {
                     &["http"],
                     *hash,
                     make_tags,
+                    i as f64 * 0.001,
+                );
+            }
+        });
+        local.flush();
+        local.shutdown();
+    });
+
+    group.bench_function("histogram/aggregate_distr_metrics_false", |b| {
+        let local = make_local_client_with_passthrough();
+        b.iter(|| {
+            for i in 0..OPS_PER_ITER {
+                local.record_histogram(
+                    "request_latency",
+                    &["http"],
+                    42,
+                    || {
+                        vec![
+                            ("endpoint", Cow::Borrowed("api/v1")),
+                            ("status", Cow::Borrowed("success")),
+                        ]
+                    },
                     i as f64 * 0.001,
                 );
             }
