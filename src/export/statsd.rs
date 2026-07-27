@@ -47,6 +47,7 @@ pub struct StatsdExporter {
     default_tags: Vec<(String, String)>,
     histogram_mode: HistogramExportMode,
     max_buffer_size: usize,
+    buffer: Mutex<String>,
 }
 
 /// Builder for [`StatsdExporter`].
@@ -116,6 +117,7 @@ impl StatsdExporterBuilder {
             default_tags: self.default_tags,
             histogram_mode: self.histogram_mode,
             max_buffer_size: self.max_buffer_size,
+            buffer: Mutex::new(String::with_capacity(self.max_buffer_size)),
         })
     }
 }
@@ -219,7 +221,8 @@ impl StatsdExporter {
     }
 
     fn send_lines(&self, lines: impl IntoIterator<Item = String>) -> Result<(), ExportError> {
-        let mut buffer = String::with_capacity(self.max_buffer_size);
+        let mut buffer = self.buffer.lock();
+        buffer.clear();
 
         for line in lines {
             if !buffer.is_empty() && buffer.len() + 1 + line.len() > self.max_buffer_size {
