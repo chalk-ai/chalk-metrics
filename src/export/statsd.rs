@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 
-use super::{ExportError, Exporter, FlushedMetric, FlushedValue};
+use super::{ExportError, Exporter, FlushedMetric, FlushedValue, RawDistributionPoint};
 
 /// How histogram (UDD Sketch) data should be emitted over StatsD.
 #[derive(Debug, Clone)]
@@ -190,9 +190,7 @@ impl StatsdExporter {
                 }
                 FlushedValue::Histogram(sketch) => match &self.histogram_mode {
                     HistogramExportMode::Distribution => {
-                        // Emit the mean as a distribution value
-                        let mean = sketch.mean();
-                        lines.push(format!("{name}:{mean}|d{tags}"));
+                        lines.push(format_distribution_line(&name, sketch.mean(), &tags));
                     }
                     HistogramExportMode::Percentiles(percentiles) => {
                         let count = sketch.count();
@@ -219,6 +217,32 @@ impl StatsdExporter {
                 }
                 buffer.push_str(&line);
             }
+        }
+
+        if !buffer.is_empty() {
+            self.send_buffer(&buffer)?;
+        }
+
+        Ok(())
+    }
+
+    /// Format raw distribution points into batched DogStatsD datagrams and send them.
+    fn send_raw_points(&self, points: &[RawDistributionPoint]) -> Result<(), ExportError> {
+        let mut buffer = String::with_capacity(self.max_buffer_size);
+
+        for point in points {
+            let name = self.full_name(point.namespace, point.metric_name);
+            let tags = self.format_tags(&point.tags.pairs);
+            let line = format_distribution_line(&name, point.value, &tags);
+
+            if !buffer.is_empty() && buffer.len() + 1 + line.len() > self.max_buffer_size {
+                self.send_buffer(&buffer)?;
+                buffer.clear();
+            }
+            if !buffer.is_empty() {
+                buffer.push('\n');
+            }
+            buffer.push_str(&line);
         }
 
         if !buffer.is_empty() {
@@ -261,6 +285,10 @@ impl StatsdExporter {
     }
 }
 
+fn format_distribution_line(name: &str, value: f64, tags: &str) -> String {
+    format!("{name}:{value}|d{tags}")
+}
+
 /// Format a percentile value as a label (e.g., 0.5 -> "p50", 0.99 -> "p99").
 fn format_percentile_label(p: f64) -> String {
     let pct = (p * 100.0).round() as u32;
@@ -286,6 +314,10 @@ fn get_inode(path: &Path) -> io::Result<u64> {
 impl Exporter for StatsdExporter {
     async fn export(&self, metrics: &[FlushedMetric]) -> Result<(), ExportError> {
         self.send_metrics(metrics)
+    }
+
+    async fn export_raw_points(&self, points: &[RawDistributionPoint]) -> Result<(), ExportError> {
+        self.send_raw_points(points)
     }
 }
 
