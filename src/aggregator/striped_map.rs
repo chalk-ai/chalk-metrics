@@ -140,47 +140,47 @@ impl StripedAggMap {
         make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
         value: f64,
     ) {
-        let combined = combine_hash(metric_name, tags_hash);
-        let stripe_idx = combined as usize & STRIPE_MASK;
-        let mut guard = self.stripes[stripe_idx].lock();
-
-        let entry = guard
-            .raw_entry_mut()
-            .from_hash(combined, |k| *k == combined);
-
-        let tags_data = match entry {
-            hashbrown::hash_map::RawEntryMut::Occupied(e) => {
-                if self.raw_sender.is_none()
-                    && let AggSlot::Histogram(ref slot) = e.get().1
-                {
-                    slot.record(value);
-                }
-                Arc::clone(&e.get().0.tags_data)
-            }
-            hashbrown::hash_map::RawEntryMut::Vacant(e) => {
-                let slot = HistogramSlot::new(self.max_buckets, self.initial_error);
-                if self.raw_sender.is_none() {
-                    slot.record(value);
-                }
-                let tags_data = Arc::new(TagsData { pairs: make_tags() });
-                let key = AggKey {
+        match &self.raw_sender {
+            Some(sender) => {
+                let tags = Arc::new(TagsData { pairs: make_tags() });
+                let _ = sender.try_send(RawDistributionPoint {
                     namespace,
                     metric_name,
-                    tags_data: Arc::clone(&tags_data),
-                };
-                e.insert_hashed_nocheck(combined, combined, (key, AggSlot::Histogram(slot)));
-                tags_data
+                    tags,
+                    value,
+                });
             }
-        };
-        drop(guard);
+            None => {
+                let combined = combine_hash(metric_name, tags_hash);
+                let stripe_idx = combined as usize & STRIPE_MASK;
+                let mut guard = self.stripes[stripe_idx].lock();
 
-        if let Some(sender) = &self.raw_sender {
-            let _ = sender.try_send(RawDistributionPoint {
-                namespace,
-                metric_name,
-                tags: tags_data,
-                value,
-            });
+                let entry = guard
+                    .raw_entry_mut()
+                    .from_hash(combined, |k| *k == combined);
+
+                match entry {
+                    hashbrown::hash_map::RawEntryMut::Occupied(e) => {
+                        if let AggSlot::Histogram(ref slot) = e.get().1 {
+                            slot.record(value);
+                        }
+                    }
+                    hashbrown::hash_map::RawEntryMut::Vacant(e) => {
+                        let slot = HistogramSlot::new(self.max_buckets, self.initial_error);
+                        slot.record(value);
+                        let key = AggKey {
+                            namespace,
+                            metric_name,
+                            tags_data: Arc::new(TagsData { pairs: make_tags() }),
+                        };
+                        e.insert_hashed_nocheck(
+                            combined,
+                            combined,
+                            (key, AggSlot::Histogram(slot)),
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -332,8 +332,10 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let map = StripedAggMap::new(200, 0.001, Some(tx));
 
+        // Passthrough mode never touches the aggregation map, so make_tags is
+        // called fresh on every record (no cached Arc<TagsData> to reuse).
         map.record_histogram("test_hist", &[], 789, || vec![("k", "v".into())], 1.0);
-        map.record_histogram("test_hist", &[], 789, || panic!("should not call"), 2.0);
+        map.record_histogram("test_hist", &[], 789, || vec![("k", "v".into())], 2.0);
 
         // The sketch is bypassed entirely in passthrough mode, so flush() has nothing to emit.
         let flushed = map.flush();
@@ -346,8 +348,7 @@ mod tests {
         assert_eq!(point1.value, 1.0);
         assert_eq!(point2.value, 2.0);
         assert_eq!(point1.metric_name, "test_hist");
-
-        assert!(Arc::ptr_eq(&point1.tags, &point2.tags));
+        assert_eq!(point1.tags.pairs, point2.tags.pairs);
     }
 
     #[test]
