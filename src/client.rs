@@ -11,6 +11,8 @@ use crate::worker;
 static GLOBAL: OnceLock<MetricsClient> = OnceLock::new();
 static SHUTDOWN_CALLED: AtomicBool = AtomicBool::new(false);
 
+const RAW_POINT_CHANNEL_CAPACITY: usize = 16_384;
+
 /// The metrics client. Holds the aggregation map and manages the background
 /// flush worker thread.
 pub struct MetricsClient {
@@ -47,6 +49,7 @@ pub struct MetricsClientBuilder {
     worker_threads: usize,
     max_buckets: u64,
     initial_error: f64,
+    aggregate_distr_metrics: bool,
 }
 
 impl MetricsClientBuilder {
@@ -57,6 +60,7 @@ impl MetricsClientBuilder {
             worker_threads: 1,
             max_buckets: 200,
             initial_error: 0.001,
+            aggregate_distr_metrics: true,
         }
     }
 
@@ -90,6 +94,14 @@ impl MetricsClientBuilder {
         self
     }
 
+    /// Set whether histogram values are aggregated into a sketch before export
+    /// (default: `true`). Set to `false` to additionally emit each raw value
+    /// as an individual point, bypassing aggregation for StatsD distribution fidelity.
+    pub fn aggregate_distr_metrics(mut self, enabled: bool) -> Self {
+        self.aggregate_distr_metrics = enabled;
+        self
+    }
+
     /// Initialize the global metrics client singleton.
     ///
     /// # Panics
@@ -117,7 +129,18 @@ impl MetricsClientBuilder {
     }
 
     fn build_inner(self) -> MetricsClient {
-        let aggregator = Arc::new(StripedAggMap::new(self.max_buckets, self.initial_error));
+        let (raw_sender, raw_receiver) = if self.aggregate_distr_metrics {
+            (None, None)
+        } else {
+            let (tx, rx) = tokio::sync::mpsc::channel(RAW_POINT_CHANNEL_CAPACITY);
+            (Some(tx), Some(rx))
+        };
+
+        let aggregator = Arc::new(StripedAggMap::new(
+            self.max_buckets,
+            self.initial_error,
+            raw_sender,
+        ));
         let shutdown_notify = Arc::new(Notify::new());
 
         let handle = worker::spawn_flush_worker(
@@ -126,6 +149,7 @@ impl MetricsClientBuilder {
             self.flush_interval,
             self.worker_threads,
             Arc::clone(&shutdown_notify),
+            raw_receiver,
         );
 
         MetricsClient {

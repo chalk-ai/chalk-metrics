@@ -1,11 +1,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::Notify;
+use tokio::sync::{mpsc, Notify};
 use tokio::time;
 
 use crate::aggregator::striped_map::StripedAggMap;
-use crate::export::Exporter;
+use crate::export::{Exporter, RawDistributionPoint};
 
 /// Spawns a dedicated OS thread running a tokio runtime for periodic
 /// metric flushing and export.
@@ -17,6 +17,7 @@ pub(crate) fn spawn_flush_worker(
     flush_interval: Duration,
     worker_threads: usize,
     shutdown: Arc<Notify>,
+    raw_receiver: Option<mpsc::Receiver<RawDistributionPoint>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("chalk-metrics-worker".into())
@@ -36,6 +37,7 @@ pub(crate) fn spawn_flush_worker(
 
             rt.block_on(async move {
                 let exporters = Arc::new(exporters);
+                let mut raw_receiver = raw_receiver;
                 let mut interval = time::interval(flush_interval);
                 interval.tick().await; // first tick is immediate, skip it
 
@@ -43,10 +45,12 @@ pub(crate) fn spawn_flush_worker(
                     tokio::select! {
                         _ = interval.tick() => {
                             flush_and_export(&aggregator, &exporters).await;
+                            drain_raw_and_export(&mut raw_receiver, &exporters).await;
                         }
                         _ = shutdown.notified() => {
                             // Final flush before shutdown
                             flush_and_export(&aggregator, &exporters).await;
+                            drain_raw_and_export(&mut raw_receiver, &exporters).await;
                             break;
                         }
                     }
@@ -67,6 +71,29 @@ async fn flush_and_export(aggregator: &StripedAggMap, exporters: &[Box<dyn Expor
     for exporter in exporters.iter() {
         if let Err(e) = exporter.export(&metrics).await {
             eprintln!("chalk-metrics: export error: {e}");
+        }
+    }
+}
+
+async fn drain_raw_and_export(
+    raw_receiver: &mut Option<mpsc::Receiver<RawDistributionPoint>>,
+    exporters: &[Box<dyn Exporter>],
+) {
+    let Some(receiver) = raw_receiver else {
+        return;
+    };
+
+    let mut points = Vec::new();
+    while let Ok(point) = receiver.try_recv() {
+        points.push(point);
+    }
+    if points.is_empty() {
+        return;
+    }
+
+    for exporter in exporters.iter() {
+        if let Err(e) = exporter.export_raw_points(&points).await {
+            eprintln!("chalk-metrics: export_raw_points error: {e}");
         }
     }
 }

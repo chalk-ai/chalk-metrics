@@ -104,4 +104,13 @@ pub trait Exporter: Send + Sync {
     /// Called once per flush interval with all metrics that were aggregated
     /// since the last flush. Errors are logged but do not halt the flush loop.
     async fn export(&self, metrics: &[FlushedMetric]) -> Result<(), ExportError>;
+
+    /// Export raw, unaggregated distribution points recorded while
+    /// `aggregate_distr_metrics(false)` is set on the client.
+    ///
+    /// Default is a no-op; only exporters that support per-event distribution
+    /// fidelity (e.g. StatsD) need to override this.
+    async fn export_raw_points(&self, _points: &[RawDistributionPoint]) -> Result<(), ExportError> {
+        Ok(())
+    }
 }

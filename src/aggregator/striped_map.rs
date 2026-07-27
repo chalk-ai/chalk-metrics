@@ -39,10 +39,15 @@ pub struct StripedAggMap {
     stripes: Box<[Stripe]>,
     max_buckets: u64,
     initial_error: f64,
+    raw_sender: Option<tokio::sync::mpsc::Sender<RawDistributionPoint>>,
 }
 
 impl StripedAggMap {
-    pub fn new(max_buckets: u64, initial_error: f64) -> Self {
+    pub fn new(
+        max_buckets: u64,
+        initial_error: f64,
+        raw_sender: Option<tokio::sync::mpsc::Sender<RawDistributionPoint>>,
+    ) -> Self {
         let stripes: Vec<_> = (0..STRIPE_COUNT)
             .map(|_| Mutex::new(HashMap::new()))
             .collect();
@@ -50,6 +55,7 @@ impl StripedAggMap {
             stripes: stripes.into_boxed_slice(),
             max_buckets,
             initial_error,
+            raw_sender,
         }
     }
 
@@ -142,22 +148,35 @@ impl StripedAggMap {
             .raw_entry_mut()
             .from_hash(combined, |k| *k == combined);
 
-        match entry {
+        let tags_data = match entry {
             hashbrown::hash_map::RawEntryMut::Occupied(e) => {
                 if let AggSlot::Histogram(ref slot) = e.get().1 {
                     slot.record(value);
                 }
+                Arc::clone(&e.get().0.tags_data)
             }
             hashbrown::hash_map::RawEntryMut::Vacant(e) => {
                 let slot = HistogramSlot::new(self.max_buckets, self.initial_error);
                 slot.record(value);
+                let tags_data = Arc::new(TagsData { pairs: make_tags() });
                 let key = AggKey {
                     namespace,
                     metric_name,
-                    tags_data: Arc::new(TagsData { pairs: make_tags() }),
+                    tags_data: Arc::clone(&tags_data),
                 };
                 e.insert_hashed_nocheck(combined, combined, (key, AggSlot::Histogram(slot)));
+                tags_data
             }
+        };
+        drop(guard);
+
+        if let Some(sender) = &self.raw_sender {
+            let _ = sender.try_send(RawDistributionPoint {
+                namespace,
+                metric_name,
+                tags: tags_data,
+                value,
+            });
         }
     }
 
@@ -223,7 +242,7 @@ mod tests {
     use super::*;
 
     fn make_map() -> StripedAggMap {
-        StripedAggMap::new(200, 0.001)
+        StripedAggMap::new(200, 0.001, None)
     }
 
     #[test]
