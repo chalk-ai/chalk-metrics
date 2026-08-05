@@ -8,6 +8,9 @@ edition = "2024"
 license = "Apache-2.0"
 description = "Fast composable metrics defined with Rust macros"
 
+[features]
+python-bindings = ["dep:pyo3"]
+
 [dependencies]
 chalk-metrics-macros = { path = "chalk-metrics-macros" }
 parking_lot = "0.12"
@@ -15,6 +18,7 @@ hashbrown = "0.15"
 libc = "0.2"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync", "net", "macros"] }
 async-trait = "0.1"
+pyo3 = { version = "0.25.1", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

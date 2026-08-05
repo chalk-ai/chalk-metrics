@@ -230,6 +230,30 @@ chalk_metrics::define_metrics! {
 }
 ```
 
+### Optional Python types
+
+When the crate that invokes `define_tags!` and `define_metrics!` enables its
+`python-bindings` feature and includes `pyo3` as an optional dependency,
+generated tags and metrics also become PyO3 classes. Enum tags retain their
+Rust variants in Python, while free-form tags are constructed from their value:
+
+```python
+Status.Success
+Endpoint("/api")
+```
+
+Metric classes accept the generated tag objects and retain their Rust recording
+API. Count metrics expose `record()` and `record_value(value)`; gauges and
+histograms expose `record(value)`:
+
+```python
+RequestCount(status=Status.Success, endpoint=Endpoint("/api")).record()
+RequestDurationMs(status=Status.Success, endpoint=Endpoint("/api")).record(5.0)
+```
+
+A binding module still registers the generated classes with Python. That
+registration is handled by the metric-binding layer.
+
 Generated metric structs expose `NAME`, `namespace()`, `export_pairs()`, and type-specific recording methods. Count metrics support `.record()` and `.record_value(i64)`. Gauge and histogram metrics support `.record(f64)`.
 
 ## Migrating From JSON Codegen
