@@ -104,6 +104,7 @@ fn expand_tags(input: TagsInput) -> TokenStream2 {
             });
 
             quote! {
+                #[cfg_attr(feature = "python-bindings", ::pyo3::pyclass(frozen, eq, eq_int, hash))]
                 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
                 #vis enum #ident {
                     #( #variants, )*
@@ -135,6 +136,7 @@ fn expand_tags(input: TagsInput) -> TokenStream2 {
             }
         } else {
             quote! {
+                #[cfg_attr(feature = "python-bindings", ::pyo3::pyclass(frozen, eq, hash))]
                 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
                 #vis struct #ident(pub String);
 
@@ -161,6 +163,20 @@ fn expand_tags(input: TagsInput) -> TokenStream2 {
                 impl From<String> for #ident {
                     fn from(s: String) -> Self {
                         Self(s)
+                    }
+                }
+
+                #[cfg(feature = "python-bindings")]
+                #[::pyo3::pymethods]
+                impl #ident {
+                    #[new]
+                    fn new(value: String) -> Self {
+                        Self(value)
+                    }
+
+                    #[getter]
+                    fn value(&self) -> String {
+                        self.0.clone()
                     }
                 }
 
