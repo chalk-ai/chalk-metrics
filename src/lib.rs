@@ -55,32 +55,13 @@
 extern crate self as chalk_metrics;
 
 pub use chalk_metrics_macros::define_namespaces;
-#[doc(hidden)]
+#[cfg(feature = "python-bindings")]
 pub use chalk_metrics_macros::{
-    define_metrics as __define_metrics_with_options, define_tags as __define_tags_with_options,
+    define_metrics_python as define_metrics, define_tags_python as define_tags,
 };
 
-#[cfg(feature = "python-bindings")]
-#[macro_export]
-macro_rules! define_tags {
-    ($($input:tt)*) => {
-        $crate::__define_tags_with_options!(python_bindings; $($input)*);
-    };
-}
-
 #[cfg(not(feature = "python-bindings"))]
-pub use chalk_metrics_macros::define_tags;
-
-#[cfg(feature = "python-bindings")]
-#[macro_export]
-macro_rules! define_metrics {
-    ($($input:tt)*) => {
-        $crate::__define_metrics_with_options!(python_bindings; $($input)*);
-    };
-}
-
-#[cfg(not(feature = "python-bindings"))]
-pub use chalk_metrics_macros::define_metrics;
+pub use chalk_metrics_macros::{define_metrics, define_tags};
 
 #[doc(hidden)]
 #[path = "private.rs"]

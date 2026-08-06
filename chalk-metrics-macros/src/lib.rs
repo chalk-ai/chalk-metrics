@@ -14,13 +14,19 @@ mod kw {
     syn::custom_keyword!(parent);
     syn::custom_keyword!(tags);
     syn::custom_keyword!(optional);
-    syn::custom_keyword!(python_bindings);
 }
 
 #[proc_macro]
 pub fn define_tags(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as TagsInput);
-    expand_tags(input).into()
+    expand_tags(input, false).into()
+}
+
+#[doc(hidden)]
+#[proc_macro]
+pub fn define_tags_python(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as TagsInput);
+    expand_tags(input, true).into()
 }
 
 #[proc_macro]
@@ -32,14 +38,23 @@ pub fn define_namespaces(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn define_metrics(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as MetricsInput);
-    match expand_metrics(input) {
+    match expand_metrics(input, false) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+#[doc(hidden)]
+#[proc_macro]
+pub fn define_metrics_python(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as MetricsInput);
+    match expand_metrics(input, true) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
 }
 
 struct TagsInput {
-    python_bindings: bool,
     tags: Vec<TagDef>,
 }
 
@@ -52,13 +67,6 @@ struct TagDef {
 
 impl Parse for TagsInput {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let python_bindings = if input.peek(kw::python_bindings) {
-            input.parse::<kw::python_bindings>()?;
-            input.parse::<Token![;]>()?;
-            true
-        } else {
-            false
-        };
         let mut tags = Vec::new();
         while !input.is_empty() {
             let vis: Visibility = input.parse()?;
@@ -96,15 +104,11 @@ impl Parse for TagsInput {
                 values,
             });
         }
-        Ok(Self {
-            python_bindings,
-            tags,
-        })
+        Ok(Self { tags })
     }
 }
 
-fn expand_tags(input: TagsInput) -> TokenStream2 {
-    let python_bindings = input.python_bindings;
+fn expand_tags(input: TagsInput, python_bindings: bool) -> TokenStream2 {
     let tags = input.tags.into_iter().map(|tag| {
         let vis = tag.vis;
         let ident = tag.ident;
@@ -308,7 +312,6 @@ fn expand_namespaces(input: NamespacesInput) -> TokenStream2 {
 }
 
 struct MetricsInput {
-    python_bindings: bool,
     groups: Vec<MetricGroup>,
 }
 
@@ -343,13 +346,6 @@ struct TagRef {
 
 impl Parse for MetricsInput {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let python_bindings = if input.peek(kw::python_bindings) {
-            input.parse::<kw::python_bindings>()?;
-            input.parse::<Token![;]>()?;
-            true
-        } else {
-            false
-        };
         let mut groups = Vec::new();
         while !input.is_empty() {
             input.parse::<kw::group>()?;
@@ -417,10 +413,7 @@ impl Parse for MetricsInput {
                 metrics,
             });
         }
-        Ok(Self {
-            python_bindings,
-            groups,
-        })
+        Ok(Self { groups })
     }
 }
 
@@ -466,8 +459,7 @@ impl Parse for TagRef {
     }
 }
 
-fn expand_metrics(input: MetricsInput) -> Result<TokenStream2> {
-    let python_bindings = input.python_bindings;
+fn expand_metrics(input: MetricsInput, python_bindings: bool) -> Result<TokenStream2> {
     let mut out = Vec::new();
     for group in input.groups {
         let namespace = group
