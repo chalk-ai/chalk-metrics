@@ -19,7 +19,14 @@ mod kw {
 #[proc_macro]
 pub fn define_tags(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as TagsInput);
-    expand_tags(input).into()
+    expand_tags(input, false).into()
+}
+
+#[doc(hidden)]
+#[proc_macro]
+pub fn define_tags_python(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as TagsInput);
+    expand_tags(input, true).into()
 }
 
 #[proc_macro]
@@ -31,7 +38,17 @@ pub fn define_namespaces(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn define_metrics(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as MetricsInput);
-    match expand_metrics(input) {
+    match expand_metrics(input, false) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+#[doc(hidden)]
+#[proc_macro]
+pub fn define_metrics_python(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as MetricsInput);
+    match expand_metrics(input, true) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
@@ -91,20 +108,25 @@ impl Parse for TagsInput {
     }
 }
 
-fn expand_tags(input: TagsInput) -> TokenStream2 {
+fn expand_tags(input: TagsInput, python_bindings: bool) -> TokenStream2 {
     let tags = input.tags.into_iter().map(|tag| {
         let vis = tag.vis;
         let ident = tag.ident;
         let export_name = tag.export_name;
 
         if let Some(values) = tag.values {
+            let python_class = if python_bindings {
+                quote! { #[::pyo3::pyclass(frozen, eq, eq_int, hash)] }
+            } else {
+                quote! {}
+            };
             let variants = values.iter().map(|(variant, _)| variant);
             let match_arms = values.iter().map(|(variant, value)| {
                 quote! { Self::#variant => #value, }
             });
 
             quote! {
-                #[cfg_attr(feature = "python-bindings", ::pyo3::pyclass(frozen, eq, eq_int, hash))]
+                #python_class
                 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
                 #vis enum #ident {
                     #( #variants, )*
@@ -135,8 +157,31 @@ fn expand_tags(input: TagsInput) -> TokenStream2 {
                 }
             }
         } else {
+            let python_class = if python_bindings {
+                quote! { #[::pyo3::pyclass(frozen, eq, hash)] }
+            } else {
+                quote! {}
+            };
+            let python_methods = if python_bindings {
+                quote! {
+                    #[::pyo3::pymethods]
+                    impl #ident {
+                        #[new]
+                        fn new(value: String) -> Self {
+                            Self(value)
+                        }
+
+                        #[getter]
+                        fn value(&self) -> String {
+                            self.0.clone()
+                        }
+                    }
+                }
+            } else {
+                quote! {}
+            };
             quote! {
-                #[cfg_attr(feature = "python-bindings", ::pyo3::pyclass(frozen, eq, hash))]
+                #python_class
                 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
                 #vis struct #ident(pub String);
 
@@ -166,19 +211,7 @@ fn expand_tags(input: TagsInput) -> TokenStream2 {
                     }
                 }
 
-                #[cfg(feature = "python-bindings")]
-                #[::pyo3::pymethods]
-                impl #ident {
-                    #[new]
-                    fn new(value: String) -> Self {
-                        Self(value)
-                    }
-
-                    #[getter]
-                    fn value(&self) -> String {
-                        self.0.clone()
-                    }
-                }
+                #python_methods
 
                 impl chalk_metrics::__private::MetricTag for #ident {
                     const EXPORT_NAME: &'static str = #export_name;
@@ -426,7 +459,7 @@ impl Parse for TagRef {
     }
 }
 
-fn expand_metrics(input: MetricsInput) -> Result<TokenStream2> {
+fn expand_metrics(input: MetricsInput, python_bindings: bool) -> Result<TokenStream2> {
     let mut out = Vec::new();
     for group in input.groups {
         let namespace = group
@@ -436,13 +469,18 @@ fn expand_metrics(input: MetricsInput) -> Result<TokenStream2> {
         for metric in group.metrics {
             let mut tags = group.tags.clone();
             tags.extend(metric.extra_tags.clone());
-            out.push(expand_metric(metric, &namespace, &tags)?);
+            out.push(expand_metric(metric, &namespace, &tags, python_bindings)?);
         }
     }
     Ok(quote! { #( #out )* })
 }
 
-fn expand_metric(metric: MetricDef, namespace: &Path, tags: &[TagRef]) -> Result<TokenStream2> {
+fn expand_metric(
+    metric: MetricDef,
+    namespace: &Path,
+    tags: &[TagRef],
+    python_bindings: bool,
+) -> Result<TokenStream2> {
     let vis = metric.vis;
     let ident = metric.ident;
     let py_ident = format_ident!("Py{}", ident);
@@ -559,6 +597,31 @@ fn expand_metric(metric: MetricDef, namespace: &Path, tags: &[TagRef]) -> Result
         },
     };
 
+    let python_wrapper = if python_bindings {
+        quote! {
+            #[::pyo3::pyclass(name = #py_name, frozen)]
+            #vis struct #py_ident {
+                inner: #ident,
+            }
+
+            #[::pyo3::pymethods]
+            impl #py_ident {
+                #[new]
+                fn new(#( #constructor_args ),*) -> Self {
+                    Self {
+                        inner: #ident {
+                            #( #constructor_fields )*
+                        },
+                    }
+                }
+
+                #python_record_methods
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     Ok(quote! {
         #[doc = #doc]
         #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -594,26 +657,7 @@ fn expand_metric(metric: MetricDef, namespace: &Path, tags: &[TagRef]) -> Result
             #record_method
         }
 
-        #[cfg(feature = "python-bindings")]
-        #[::pyo3::pyclass(name = #py_name, frozen)]
-        #vis struct #py_ident {
-            inner: #ident,
-        }
-
-        #[cfg(feature = "python-bindings")]
-        #[::pyo3::pymethods]
-        impl #py_ident {
-            #[new]
-            fn new(#( #constructor_args ),*) -> Self {
-                Self {
-                    inner: #ident {
-                        #( #constructor_fields )*
-                    },
-                }
-            }
-
-            #python_record_methods
-        }
+        #python_wrapper
     })
 }
 
