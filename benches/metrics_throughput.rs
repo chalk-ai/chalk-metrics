@@ -222,6 +222,7 @@ fn single_thread_benchmarks(c: &mut Criterion) {
                     );
                 }
                 elapsed += start.elapsed();
+                assert_eq!(local.dropped_raw_samples(), 0);
                 local.shutdown();
             }
             elapsed

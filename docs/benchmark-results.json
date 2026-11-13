@@ -1,0 +1,69 @@
+{
+  "unit": "nanoseconds per benchmark iteration",
+  "baseline_revision": "96ae2f1dfe728a678556b9be71c80c54b17c2909",
+  "estimator": "Criterion slope when available, otherwise mean",
+  "results": {
+    "upstream": {
+      "growth/count": 87741.74765776229,
+      "growth/gauge": 86291.93472706155,
+      "growth/histogram": 152170.74049554783,
+      "single_thread/histogram_static_tags": 55370.32652182825,
+      "single_thread/histogram_mixed_tags": 56660.064337333846,
+      "single_thread/count_mixed_tags": 15565.985089157613,
+      "single_thread/count_static_tags": 14576.848094279108,
+      "single_thread/gauge_mixed_tags": 11431.32252441949,
+      "single_thread/histogram_raw_accepted": 64970.90321331785,
+      "single_thread/gauge_static_tags": 10447.484678158811,
+      "contention/histogram_mixed/8_threads": 477779.9719125048,
+      "contention/histogram_mixed/2_threads": 980710.2850522648,
+      "contention/count_mixed/8_threads": 265032.66570754186,
+      "contention/count_mixed/2_threads": 263425.6892782479,
+      "statsd_export/raw_distribution/1000": 325105.9461324042,
+      "statsd_export/raw_distribution/10": 4255.180985874125,
+      "statsd_export/raw_distribution/100": 32436.83261959695,
+      "statsd_export/percentiles/1000": 3783911.9282229966,
+      "statsd_export/percentiles/10": 36857.492546093185,
+      "statsd_export/percentiles/100": 374273.12505923345
+    },
+    "aggregation": {
+      "growth/count": 56886.32795199381,
+      "growth/gauge": 56229.89430894309,
+      "growth/histogram": 121957.73600464576,
+      "single_thread/histogram_static_tags": 52336.85518436268,
+      "single_thread/histogram_mixed_tags": 60440.300668195654,
+      "single_thread/count_mixed_tags": 16528.440205556795,
+      "single_thread/count_static_tags": 15616.495158114678,
+      "single_thread/gauge_mixed_tags": 12424.572806441236,
+      "single_thread/histogram_raw_accepted": 65349.21951219512,
+      "single_thread/gauge_static_tags": 11730.270320812442,
+      "contention/histogram_mixed/8_threads": 513829.179229578,
+      "contention/histogram_mixed/2_threads": 1069449.0607433217,
+      "contention/count_mixed/8_threads": 210782.2373596593,
+      "contention/count_mixed/2_threads": 268303.6893728223
+    },
+    "distribution_routing": {
+      "single_thread/histogram_static_tags": 53362.034290386,
+      "single_thread/histogram_mixed_tags": 61296.549993299384,
+      "single_thread/histogram_raw_accepted": 46056.74506387921
+    },
+    "transport": {
+      "statsd_export/raw_distribution/1000": 319832.6321758981,
+      "statsd_export/raw_distribution/10": 4331.189914725028,
+      "statsd_export/raw_distribution/100": 34143.281159869555,
+      "statsd_export/percentiles/1000": 3780704.3622531937,
+      "statsd_export/percentiles/10": 35724.114318585234,
+      "statsd_export/percentiles/100": 377165.2073036719
+    },
+    "prometheus_final": {
+      "prometheus_export/mixed_2_tags/1000": 5290290.495818815,
+      "prometheus_export/mixed_2_tags/10": 47044.60701348881,
+      "prometheus_export/mixed_2_tags/100": 518768.0064735008,
+      "prometheus_export/mixed_0_tags/1000": 5271060.74250871,
+      "prometheus_export/mixed_0_tags/10": 43942.5859888566,
+      "prometheus_export/mixed_0_tags/100": 485853.27735191636,
+      "prometheus_export/mixed_5_tags/1000": 5518572.794947735,
+      "prometheus_export/mixed_5_tags/10": 49638.90155327343,
+      "prometheus_export/mixed_5_tags/100": 553307.6209639953
+    }
+  }
+}

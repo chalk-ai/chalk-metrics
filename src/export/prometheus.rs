@@ -13,7 +13,7 @@ pub const DEFAULT_BUCKET_BOUNDARIES: &[f64] = &[
 /// Prometheus text format exporter.
 ///
 /// On each flush, renders all metrics into the Prometheus exposition text
-/// format and stores the result for retrieval via [`get_metrics_text`].
+/// format and stores the result for retrieval via [`Self::get_metrics_text`].
 ///
 /// This exporter does not serve HTTP — it is the caller's responsibility
 /// to integrate the rendered text into an HTTP endpoint (e.g., via axum,

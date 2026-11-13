@@ -2,13 +2,13 @@
 
 Efficient metrics aggregation with Rust macro definitions and pluggable exporters.
 
-Define your metrics in Rust macro files, then record metrics with zero-allocation hot-path performance. Each metric is a struct — call `.record()` and the value type is enforced at compile time.
+Define your metrics in Rust macro files, then record metrics with low overhead and cached tag data. Each metric is a struct — call `.record()` and the value type is enforced at compile time.
 
 ## Features
 
 - **Type-safe recording**: Each metric is a struct with `.record(value)`. Count metrics accept `i64` (or no arg for +1), gauge/histogram accept `f64`. Wrong type = compile error.
 - **Hierarchical namespaces**: Define namespace marker types, including optional parent namespaces. Exporters receive namespace segments and format them (Prometheus uses `_`, StatsD uses `.`).
-- **Zero-allocation hot path**: Striped `parking_lot` locks with consistent `hashbrown::HashMap::entry` operations — only allocates on first-seen tag combinations.
+- **Cached series tags**: Striped `parking_lot` locks with consistent `hashbrown::HashMap::entry` operations. Existing entries reuse tag data; raw observations use a bounded queue.
 - **Pluggable exporters**: Prometheus text format and StatsD/DogStatsD included, plus an async `Exporter` trait for custom backends.
 - **Singleton client**: `env_logger`-style `init()`/`try_init()` with automatic shutdown via `atexit`.
 
@@ -405,9 +405,11 @@ parallelize exporter calls.
 The shared raw-sample queue defaults to 16,384 observations and can be sized with
 `raw_sample_queue_capacity(n)` (`n > 0`). Size it for peak sample rate times the
 raw interval plus slow-exporter headroom and bursts. Packing reduces wire bytes,
-not queue occupancy: each observation still occupies one slot. Recording never waits for space:
-overflow drops the newest raw sample. `client.dropped_raw_samples()` counts full
-or closed queue rejections. Sketch consumers still include these observations.
+not queue occupancy: each observation still occupies one slot. Recording never
+waits for space:
+overflow drops the newest raw sample. `client.dropped_raw_samples()` (local clients) or
+`chalk_metrics::client::dropped_raw_samples()` (global client) counts full or
+closed queue rejections. Sketch consumers still include these observations.
 This counter does not include network failures.
 
 UDP accepts IPv4, bracketed IPv6, and hostnames with ports. Dual-stack hostnames

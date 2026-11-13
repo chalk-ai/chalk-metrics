@@ -94,6 +94,126 @@ fn zero_raw_queue_capacity_is_rejected() {
 }
 
 #[test]
+fn periodic_flush_delivers_each_sample_once_with_either_runtime() {
+    for threads in [1, 2] {
+        let socket = listener();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let client = client::builder()
+            .with_exporter(distribution(&socket))
+            .worker_threads(threads)
+            .flush_interval(Duration::from_millis(20))
+            .build_local();
+        for value in [1.0, 99.0] {
+            client.record_histogram("latency", &[], 42, Vec::new, value);
+        }
+        let mut received = Vec::new();
+        let mut buffer = [0; 4096];
+        while received.len() < 2 {
+            let n = socket.recv(&mut buffer).unwrap();
+            received.extend(
+                std::str::from_utf8(&buffer[..n])
+                    .unwrap()
+                    .lines()
+                    .map(str::to_owned),
+            );
+        }
+        client.shutdown();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        received.extend(lines(&socket));
+        received.sort();
+        assert_eq!(received, ["latency:1|d", "latency:99|d"]);
+    }
+}
+
+#[test]
+fn shutdown_flushes_every_accepted_sample_after_producers_join() {
+    let socket = listener();
+    let client = std::sync::Arc::new(
+        client::builder()
+            .with_exporter(distribution(&socket))
+            .raw_sample_queue_capacity(512)
+            .flush_interval(Duration::from_secs(3600))
+            .build_local(),
+    );
+    let threads: Vec<_> = (0..4)
+        .map(|_| {
+            let client = std::sync::Arc::clone(&client);
+            std::thread::spawn(move || {
+                for _ in 0..50 {
+                    for value in [1.0, 99.0] {
+                        client.record_histogram("latency", &[], 42, Vec::new, value);
+                    }
+                }
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    assert_eq!(client.dropped_raw_samples(), 0);
+    client.shutdown();
+    client.shutdown();
+    let received = lines(&socket);
+    assert_eq!(received.len(), 400);
+    assert_eq!(
+        received
+            .iter()
+            .filter(|line| *line == "latency:1|d")
+            .count(),
+        200
+    );
+    assert_eq!(
+        received
+            .iter()
+            .filter(|line| *line == "latency:99|d")
+            .count(),
+        200
+    );
+}
+
+struct FailingRawExporter;
+
+#[async_trait::async_trait]
+impl chalk_metrics::export::Exporter for FailingRawExporter {
+    fn distribution_input(&self) -> Option<chalk_metrics::export::DistributionInput> {
+        Some(chalk_metrics::export::DistributionInput::Raw)
+    }
+    async fn export(
+        &self,
+        _: &[chalk_metrics::export::FlushedMetric],
+    ) -> Result<(), chalk_metrics::export::ExportError> {
+        Ok(())
+    }
+    async fn export_raw_points(
+        &self,
+        _: &[chalk_metrics::export::RawDistributionPoint],
+    ) -> Result<(), chalk_metrics::export::ExportError> {
+        Err(chalk_metrics::export::ExportError::new(
+            "deliberate exporter failure",
+        ))
+    }
+}
+
+#[test]
+fn one_exporter_failure_does_not_prevent_other_destinations() {
+    let socket = listener();
+    let client = client::builder()
+        .with_exporter(FailingRawExporter)
+        .with_exporter(distribution(&socket))
+        .flush_interval(Duration::from_secs(3600))
+        .build_local();
+    for value in [1.0, 99.0] {
+        client.record_histogram("latency", &[], 42, Vec::new, value);
+    }
+    client.shutdown();
+    assert_eq!(lines(&socket), ["latency:1|d", "latency:99|d"]);
+}
+
+#[test]
 #[allow(deprecated)]
 fn mixed_exporters_keep_samples_and_sketches_with_either_legacy_setting() {
     for legacy in [true, false] {

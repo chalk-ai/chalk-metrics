@@ -633,180 +633,63 @@ mod tests {
         Arc::new(TagsData { pairs })
     }
 
-    // Helper to test formatting without actually sending
-    struct FormatOnlyExporter {
-        namespace: Option<String>,
-        default_tags: Vec<(String, String)>,
-        histogram_mode: HistogramExportMode,
-    }
-
-    impl FormatOnlyExporter {
-        fn format_metric(&self, metric: &FlushedMetric) -> Vec<String> {
-            let mut parts = Vec::new();
-            if let Some(ns) = &self.namespace {
-                parts.push(ns.as_str());
-            }
-            parts.extend_from_slice(metric.namespace);
-            parts.push(metric.metric_name);
-            let name = parts.join(".");
-
-            let mut all_tags: Vec<(&str, &str)> = self
-                .default_tags
-                .iter()
-                .map(|(k, v)| (k.as_str(), v.as_ref()))
-                .collect();
-            for (k, v) in &metric.tags.pairs {
-                all_tags.push((k, v.as_ref()));
-            }
-            let tags = if all_tags.is_empty() {
-                String::new()
-            } else {
-                let inner: Vec<String> = all_tags.iter().map(|(k, v)| format!("{k}:{v}")).collect();
-                format!("|#{}", inner.join(","))
-            };
-
-            let mut lines = Vec::new();
-            match &metric.value {
-                FlushedValue::Count(value) => {
-                    lines.push(format!("{name}:{value}|c{tags}"));
-                }
-                FlushedValue::Gauge(value) => {
-                    lines.push(format!("{name}:{value}|g{tags}"));
-                }
-                FlushedValue::Histogram(sketch) => match &self.histogram_mode {
-                    HistogramExportMode::Distribution => {
-                        let mean = sketch.mean();
-                        lines.push(format!("{name}:{mean}|d{tags}"));
-                    }
-                    HistogramExportMode::Percentiles(percentiles) => {
-                        lines.push(format!("{name}.count:{}|g{tags}", sketch.count()));
-                        lines.push(format!("{name}.avg:{}|g{tags}", sketch.mean()));
-                        for &p in percentiles {
-                            let value = sketch.estimate_quantile(p);
-                            let label = format_percentile_label(p);
-                            lines.push(format!("{name}.{label}:{value}|g{tags}"));
-                        }
-                    }
-                },
-            }
-            lines
-        }
-    }
-
     #[test]
-    fn test_format_count() {
-        let exp = FormatOnlyExporter {
-            namespace: None,
-            default_tags: vec![],
-            histogram_mode: HistogramExportMode::default(),
-        };
-        let metric = FlushedMetric {
-            namespace: &[],
-            metric_name: "request_count",
-            tags: make_tags(vec![]),
-            value: FlushedValue::Count(42),
-        };
-        let lines = exp.format_metric(&metric);
-        assert_eq!(lines, vec!["request_count:42|c"]);
-    }
-
-    #[test]
-    fn test_format_gauge() {
-        let exp = FormatOnlyExporter {
-            namespace: None,
-            default_tags: vec![],
-            histogram_mode: HistogramExportMode::default(),
-        };
-        let metric = FlushedMetric {
-            namespace: &[],
-            metric_name: "temperature",
-            tags: make_tags(vec![]),
-            value: FlushedValue::Gauge(23.5),
-        };
-        let lines = exp.format_metric(&metric);
-        assert_eq!(lines, vec!["temperature:23.5|g"]);
-    }
-
-    #[test]
-    fn test_format_with_tags() {
-        let exp = FormatOnlyExporter {
-            namespace: None,
-            default_tags: vec![],
-            histogram_mode: HistogramExportMode::default(),
-        };
-        let metric = FlushedMetric {
-            namespace: &[],
-            metric_name: "req",
-            tags: make_tags(vec![
-                ("endpoint", "/api".into()),
-                ("status", "success".into()),
-            ]),
-            value: FlushedValue::Count(1),
-        };
-        let lines = exp.format_metric(&metric);
-        assert_eq!(lines, vec!["req:1|c|#endpoint:/api,status:success"]);
-    }
-
-    #[test]
-    fn test_format_with_namespace() {
-        let exp = FormatOnlyExporter {
-            namespace: Some("myapp".into()),
-            default_tags: vec![],
-            histogram_mode: HistogramExportMode::default(),
-        };
-        let metric = FlushedMetric {
-            namespace: &[],
-            metric_name: "req",
-            tags: make_tags(vec![]),
-            value: FlushedValue::Count(1),
-        };
-        let lines = exp.format_metric(&metric);
-        assert_eq!(lines, vec!["myapp.req:1|c"]);
-    }
-
-    #[test]
-    fn test_format_with_default_tags() {
-        let exp = FormatOnlyExporter {
-            namespace: None,
-            default_tags: vec![("env".into(), "prod".into())],
-            histogram_mode: HistogramExportMode::default(),
-        };
-        let metric = FlushedMetric {
-            namespace: &[],
-            metric_name: "req",
-            tags: make_tags(vec![("ep", "/api".into())]),
-            value: FlushedValue::Count(1),
-        };
-        let lines = exp.format_metric(&metric);
-        assert_eq!(lines, vec!["req:1|c|#env:prod,ep:/api"]);
-    }
-
-    #[test]
-    fn test_format_histogram_percentiles() {
-        let exp = FormatOnlyExporter {
-            namespace: None,
-            default_tags: vec![],
-            histogram_mode: HistogramExportMode::Percentiles(vec![0.5, 0.99]),
-        };
-
+    fn production_packets_format_namespaces_tags_and_all_metric_types() {
+        let listener = UdpSocket::bind("127.0.0.1:0").unwrap();
+        listener
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let exporter = StatsdExporter::udp(listener.local_addr().unwrap().to_string())
+            .namespace("app")
+            .default_tag("env", "prod")
+            .histogram_mode(HistogramExportMode::Percentiles(vec![0.5, 0.99]))
+            .build()
+            .unwrap();
         let mut sketch = UDDSketch::new(200, 0.001);
-        for i in 1..=100 {
-            sketch.add_value(i as f64);
+        for value in 1..=100 {
+            sketch.add_value(f64::from(value));
         }
-
-        let metric = FlushedMetric {
-            namespace: &[],
-            metric_name: "latency",
-            tags: make_tags(vec![]),
-            value: FlushedValue::Histogram(sketch),
-        };
-        let lines = exp.format_metric(&metric);
-
-        assert_eq!(lines.len(), 4); // count, avg, p50, p99
-        assert!(lines[0].starts_with("latency.count:100|g"));
-        assert!(lines[1].starts_with("latency.avg:"));
-        assert!(lines[2].contains("latency.p50:"));
-        assert!(lines[3].contains("latency.p99:"));
+        let tags = make_tags(vec![("status", "ok".into())]);
+        let metrics = [
+            FlushedMetric {
+                namespace: &["http"],
+                metric_name: "requests",
+                tags: Arc::clone(&tags),
+                value: FlushedValue::Count(7),
+            },
+            FlushedMetric {
+                namespace: &["http"],
+                metric_name: "active",
+                tags: Arc::clone(&tags),
+                value: FlushedValue::Gauge(4.0),
+            },
+            FlushedMetric {
+                namespace: &["http"],
+                metric_name: "latency",
+                tags,
+                value: FlushedValue::Histogram(sketch),
+            },
+        ];
+        exporter.send_metrics(&metrics).unwrap();
+        let mut buffer = [0; 4096];
+        let n = listener.recv(&mut buffer).unwrap();
+        let lines: Vec<_> = std::str::from_utf8(&buffer[..n]).unwrap().lines().collect();
+        assert_eq!(lines.len(), 6);
+        assert!(lines.contains(&"app.http.requests:7|c|#env:prod,status:ok"));
+        assert!(lines.contains(&"app.http.active:4|g|#env:prod,status:ok"));
+        assert!(lines.contains(&"app.http.latency.count:100|g|#env:prod,status:ok"));
+        assert!(lines.contains(&"app.http.latency.avg:50.5|g|#env:prod,status:ok"));
+        for (label, expected) in [("p50", 50.0), ("p99", 99.0)] {
+            let prefix = format!("app.http.latency.{label}:");
+            let line = lines.iter().find(|line| line.starts_with(&prefix)).unwrap();
+            let value: f64 = line[prefix.len()..]
+                .split('|')
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!((value - expected).abs() < 2.0);
+        }
     }
 
     #[test]

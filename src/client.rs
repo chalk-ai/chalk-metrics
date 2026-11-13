@@ -243,6 +243,12 @@ pub fn builder() -> MetricsClientBuilder {
     MetricsClientBuilder::new()
 }
 
+/// Number of raw observations rejected by the global client's full or closed
+/// queue. Returns zero before initialization. Transport failures are separate.
+pub fn dropped_raw_samples() -> u64 {
+    GLOBAL.get().map_or(0, MetricsClient::dropped_raw_samples)
+}
+
 /// Shut down the global metrics client. Safe to call multiple times.
 pub fn shutdown() {
     if SHUTDOWN_CALLED
@@ -404,7 +410,8 @@ impl MetricsClient {
             .record_histogram(metric_name, namespace, tags_hash, make_tags, value);
     }
 
-    /// Manually trigger a flush and return the flushed metrics.
+    /// Drain aggregates for inspection, consuming data otherwise exported by the
+    /// worker. This does not export metrics or drain the raw-sample queue.
     pub fn flush(&self) -> Vec<crate::export::FlushedMetric> {
         self.aggregator.flush()
     }
@@ -533,6 +540,7 @@ mod tests {
         record_count("noop", &[], 0, Vec::new, 1);
         record_gauge("noop", &[], 0, Vec::new, 1.0);
         record_histogram("noop", &[], 0, Vec::new, 1.0);
+        assert_eq!(dropped_raw_samples(), 0);
     }
 
     #[test]

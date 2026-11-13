@@ -6,7 +6,7 @@
 //! ## Overview
 //!
 //! Define your metrics with Rust macros, then record metrics with
-//! zero-allocation hot-path performance. Each
+//! low overhead and cached tag data. Each
 //! metric is a struct with a `.record()` method that enforces the correct
 //! value type at compile time.
 //!
