@@ -6,7 +6,7 @@ license = "Apache-2.0"
 description = "Proc macros for chalk-metrics"
 repository = "https://github.com/chalk-ai/chalk-metrics"
 rust-version = "1.88"
-include = ["src/**"]
+include = ["src/**", "LICENSE"]
 
 [lib]
 proc-macro = true

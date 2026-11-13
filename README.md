@@ -362,6 +362,9 @@ return `Some(DistributionInput::Sketch)`; `Both` explicitly requests both callba
 
 ### Custom Exporters
 
+Exporters run on the worker's tokio runtime. chalk-metrics does not enable tokio's
+`net` feature, so an exporter that uses `tokio::net` must enable it in its own crate.
+
 ```rust
 #[async_trait::async_trait]
 impl Exporter for MyExporter {

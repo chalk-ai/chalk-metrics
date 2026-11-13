@@ -24,7 +24,8 @@ pub(crate) fn spawn_flush_worker(
         .name("chalk-metrics-worker".into())
         .spawn(move || {
             // `enable_all` turns on the I/O driver only when some crate in the
-            // build enables tokio's `net` feature (e.g. a custom exporter).
+            // build enables a tokio feature that needs it, such as `net` for a
+            // custom exporter.
             let rt = if worker_threads <= 1 {
                 tokio::runtime::Builder::new_current_thread()
                     .enable_all()
