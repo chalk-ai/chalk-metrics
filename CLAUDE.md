@@ -40,7 +40,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Associated const `NAME` and method `namespace()` provide metric identity
 
 ### Aggregation
-- `src/aggregator/striped_map.rs` — 64-stripe concurrent map using `parking_lot::Mutex` and `hashbrown::RawEntryMut`
+- `src/aggregator/striped_map.rs` — 64-stripe concurrent map using `parking_lot::Mutex` and the `hashbrown` `Entry` API
 - Uses `&'static str` pointer address for metric identity hashing (no u16 discriminant)
 - `src/aggregator/count.rs` — lock-free `AtomicI64` (swap-to-zero on flush)
 - `src/aggregator/gauge.rs` — lock-free `AtomicU64` storing f64 as bits (persists across flushes)

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Build and dependencies: update the lockfile (fixes RUSTSEC-2026-0386 in tokio and
+  RUSTSEC-2026-0204 in a dev dependency), drop tokio's unused `net` feature, move to
+  hashbrown 0.17 and syn 3, and declare `rust-version = "1.85"`. Exporters that use
+  `tokio::net` must enable tokio's `net` feature themselves.
+- Packaging: `chalk-metrics-macros` is versioned with `chalk-metrics` and published
+  first, and the crate tarball contains only sources, README, LICENSE and CHANGELOG.
 - Fix series lookup after aggregation-map growth. A series now produces one entry
   with complete counter totals, latest gauge updates, and all histogram samples.
   Generated metrics compute content-based name fingerprints at compile time;
