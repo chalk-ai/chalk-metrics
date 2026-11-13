@@ -4,8 +4,11 @@
 
 - Build and dependencies: update the lockfile (fixes RUSTSEC-2026-0386 in tokio and
   RUSTSEC-2026-0204 in a dev dependency), drop tokio's unused `net` feature, move to
-  hashbrown 0.17 and syn 3, and declare `rust-version = "1.85"`. Exporters that use
+  hashbrown 0.17 and syn 3, and declare `rust-version = "1.88"`. Exporters that use
   `tokio::net` must enable tokio's `net` feature themselves.
+- `python-bindings` now uses pyo3 0.30 (fixes RUSTSEC-2026-0176 and RUSTSEC-2026-0177).
+  Crates enabling it must depend on pyo3 0.30. Generated tag classes opt into
+  `from_py_object` so metric constructors still accept them.
 - Packaging: `chalk-metrics-macros` is versioned with `chalk-metrics` and published
   first, and the crate tarball contains only sources, README, LICENSE and CHANGELOG.
 - Fix series lookup after aggregation-map growth. A series now produces one entry

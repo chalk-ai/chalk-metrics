@@ -233,7 +233,7 @@ chalk_metrics::define_metrics! {
 ### Optional Python types
 
 When the crate that invokes `define_tags!` and `define_metrics!` enables its
-`python-bindings` feature and includes `pyo3` as an optional dependency,
+`python-bindings` feature and includes `pyo3` 0.30 as an optional dependency,
 generated tags and metrics also become PyO3 classes. Enum tags retain their
 Rust variants in Python, while free-form tags are constructed from their value:
 

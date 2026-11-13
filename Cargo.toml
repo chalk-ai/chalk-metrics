@@ -9,7 +9,7 @@ license = "Apache-2.0"
 description = "Fast composable metrics defined with Rust macros"
 repository = "https://github.com/chalk-ai/chalk-metrics"
 documentation = "https://docs.rs/chalk-metrics"
-rust-version = "1.85"
+rust-version = "1.88"
 include = ["src/**", "README.md", "LICENSE", "CHANGELOG.md"]
 
 [features]
@@ -22,7 +22,7 @@ hashbrown = { version = "0.17", default-features = false, features = ["default-h
 libc = "0.2"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync", "macros"] }
 async-trait = "0.1"
-pyo3 = { version = "0.25.1", optional = true }
+pyo3 = { version = "0.30", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support", "rayon"] }
