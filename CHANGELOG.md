@@ -22,3 +22,12 @@
 - Direct Distribution export of sketches returns an error. Use `export_raw_points`
   with original observations. Valid counters and gauges in a rejected batch are
   still sent; a batch error can indicate partial delivery.
+- Support IPv4 and IPv6 destinations, preferring IPv4 for dual-stack hostnames
+  such as `localhost`. UDP setup cannot verify that an agent is listening.
+- Retain UDS connections on receiver backpressure (`WouldBlock`) and reconnect
+  after other failures or socket replacement. Failed datagrams are not retried.
+- Reject oversized individual lines while attempting valid siblings. Expose
+  bounded raw-queue capacity and an independent raw flush interval (100 ms default).
+  Overflow drops newest raw observations and counts queue rejections; mixed
+  sketches stay complete. Stop/join producers and explicitly shut down local
+  clients to flush accepted observations; shutdown is best effort, not acknowledgment.

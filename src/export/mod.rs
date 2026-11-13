@@ -92,7 +92,8 @@ pub enum DistributionInput {
     Sketch,
     /// Individual observations, subject to the bounded raw-sample queue.
     Raw,
-    /// Both representations, delivered through their respective export methods.
+    /// Both representations, delivered through their respective export methods
+    /// on independent raw-sample and aggregate flush intervals.
     Both,
 }
 
@@ -112,7 +113,7 @@ pub(crate) struct ConfiguredExporter {
 
 /// Trait for exporting aggregated metrics to an external system.
 ///
-/// Implementors receive a slice of [`FlushedMetric`] on each flush interval
+/// Implementors receive a slice of [`FlushedMetric`] on each aggregate flush interval
 /// and are responsible for formatting and sending them to their destination
 /// (e.g., StatsD, Prometheus, custom backends).
 ///
@@ -146,7 +147,8 @@ pub trait Exporter: Send + Sync {
     /// since the last flush. Errors are logged but do not halt the flush loop.
     async fn export(&self, metrics: &[FlushedMetric]) -> Result<(), ExportError>;
 
-    /// Export original observations when this exporter requests raw samples.
+    /// Export original observations when this exporter requests raw samples,
+    /// on the independent raw-sample flush interval (default: 100 milliseconds).
     ///
     /// Default is a no-op; only exporters that support per-event distribution
     /// fidelity (e.g. StatsD) need to override this.

@@ -15,6 +15,7 @@ pub(crate) fn spawn_flush_worker(
     aggregator: Arc<StripedAggMap>,
     exporters: Vec<ConfiguredExporter>,
     flush_interval: Duration,
+    raw_sample_flush_interval: Duration,
     worker_threads: usize,
     shutdown: Arc<Notify>,
     raw_receiver: Option<mpsc::Receiver<RawDistributionPoint>>,
@@ -41,11 +42,16 @@ pub(crate) fn spawn_flush_worker(
                 let mut interval = time::interval(flush_interval);
                 interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
                 interval.tick().await; // first tick is immediate, skip it
+                let mut raw_interval = time::interval(raw_sample_flush_interval);
+                raw_interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+                raw_interval.tick().await;
 
                 loop {
                     tokio::select! {
                         _ = interval.tick() => {
                             flush_and_export(&aggregator, &exporters).await;
+                        }
+                        _ = raw_interval.tick(), if raw_receiver.is_some() => {
                             drain_raw_and_export(&mut raw_receiver, &exporters).await;
                         }
                         _ = shutdown.notified() => {

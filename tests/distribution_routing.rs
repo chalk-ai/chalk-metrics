@@ -68,6 +68,7 @@ fn overflow_drops_newest_raw_sample_but_retains_complete_sketch() {
         .with_exporter(distribution(&socket))
         .with_exporter(prom)
         .raw_sample_queue_capacity(2)
+        .raw_sample_flush_interval(Duration::from_secs(3600))
         .flush_interval(Duration::from_secs(3600))
         .build_local();
     for value in [1.0, 99.0, 5.0] {

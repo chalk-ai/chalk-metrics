@@ -387,32 +387,43 @@ chalk_metrics::client::builder()
     .max_buckets(200)                // histogram max buckets
     .initial_error(0.001)            // histogram error bound
     .raw_sample_queue_capacity(16_384) // queued original observations
+    .raw_sample_flush_interval(Duration::from_millis(100))
     .init();                         // or .try_init() for Result
 ```
 
 ### Flush latency, overflow, and shutdown
 
-Both sketches and original observations are exported on the flush interval
-(default 10 seconds). The worker skips its immediate startup tick. Allow up to
-one interval plus scheduling and exporter execution time; slow exporters can
-extend this latency because exporter calls are sequential, even with multiple
-runtime threads. Increasing `worker_threads` does not parallelize exporter calls.
+Counters, gauges, and sketches are exported on `flush_interval` (default 10
+seconds). Original observations use a separate `raw_sample_flush_interval`
+(default 100 milliseconds, must be positive). Both timers skip their immediate
+startup tick. Allow up to the relevant interval plus scheduling and exporter
+execution time. Slow exporters can extend either latency because calls are
+sequential, even with multiple runtime threads. A custom `Both` exporter receives
+independent raw and aggregate windows. Increasing `worker_threads` does not
+parallelize exporter calls.
 
 The shared raw-sample queue defaults to 16,384 observations and can be sized with
 `raw_sample_queue_capacity(n)` (`n > 0`). Size it for peak sample rate times the
-flush interval plus slow-exporter headroom. Recording never waits for space:
+raw interval plus slow-exporter headroom and bursts. Packing reduces wire bytes,
+not queue occupancy: each observation still occupies one slot. Recording never waits for space:
 overflow drops the newest raw sample. `client.dropped_raw_samples()` counts full
 or closed queue rejections. Sketch consumers still include these observations.
 This counter does not include network failures.
 
-UDP accepts IPv4, bracketed IPv6, and hostnames with ports. Datagram limits are
-1432 bytes for UDP and 8192 for UDS by default, configurable with
+UDP accepts IPv4, bracketed IPv6, and hostnames with ports. Dual-stack hostnames
+prefer IPv4, preserving `localhost` delivery to IPv4-only agents. Explicit IPv6
+and IPv6-only hostnames use IPv6. Address selection cannot detect which UDP
+receiver is listening. Datagram limits are 1432 bytes for UDP and 8192 for UDS by default, configurable with
 `max_buffer_size(n)` (`n > 0`). Limits include UTF-8 bytes and newline separators.
 A line larger than the limit is rejected without splitting it; valid sibling
 lines are sent and the batch returns an error. Send failures are returned to
-direct callers and logged by the worker. There are no delivery acknowledgments
+direct callers and logged by the worker. A failed send does not prevent attempts
+to send later datagrams in the batch; earlier successes are not replayed. A batch
+error can therefore mean partial delivery. There are no delivery acknowledgments
 or retries, and successful UDP sends do not guarantee receiver delivery. UDS
-connections reconnect after failures or socket replacement on later exports.
+connections retain their socket on `WouldBlock` (receiver backpressure); that
+send fails without a retry. Other send failures clear the connection so a later
+datagram can reconnect. Socket replacement also triggers reconnection.
 
 Stop and join metric-producing threads, then call the local client's
 `shutdown()` or global `chalk_metrics::client::shutdown()`. Shutdown closes the

@@ -49,8 +49,23 @@ async fn udp_supports_ipv4_and_ipv6() {
             .export_raw_points(&[point("latency", 1.0), point("latency", 99.0)])
             .await
             .unwrap();
-        assert_eq!(packets(&socket), [b"latency:1|d\nlatency:99|d".to_vec()]);
+        assert_eq!(packets(&socket), [b"latency:1:99|d".to_vec()]);
     }
+}
+
+#[tokio::test]
+async fn localhost_reaches_an_ipv4_only_agent() {
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let exporter =
+        StatsdExporter::udp(format!("localhost:{}", socket.local_addr().unwrap().port()))
+            .histogram_mode(HistogramExportMode::Distribution)
+            .build()
+            .unwrap();
+    exporter
+        .export_raw_points(&[point("latency", 1.0), point("latency", 99.0)])
+        .await
+        .unwrap();
+    assert_eq!(packets(&socket), [b"latency:1:99|d".to_vec()]);
 }
 
 #[tokio::test]
@@ -58,6 +73,7 @@ async fn batching_counts_newlines_and_preserves_every_sample() {
     let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
     let exporter = StatsdExporter::udp(socket.local_addr().unwrap().to_string())
         .histogram_mode(HistogramExportMode::Distribution)
+        .distribution_value_packing(false)
         .max_buffer_size(12)
         .build()
         .unwrap();
@@ -87,7 +103,7 @@ async fn oversized_lines_are_rejected_without_losing_valid_siblings() {
         ])
         .await;
     assert!(result.is_err());
-    assert_eq!(packets(&socket), [b"x:1|d\nx:99|d".to_vec()]);
+    assert_eq!(packets(&socket), [b"x:1:99|d".to_vec()]);
 }
 
 #[test]

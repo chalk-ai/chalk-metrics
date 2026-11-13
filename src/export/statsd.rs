@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::io;
-use std::net::{ToSocketAddrs, UdpSocket};
+use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 #[cfg(unix)]
 use std::os::unix::net::UnixDatagram;
 use std::path::{Path, PathBuf};
@@ -146,6 +146,9 @@ impl StatsdExporterBuilder {
 impl StatsdExporter {
     /// Create a builder targeting an IPv4/IPv6 address or hostname with a port
     /// (e.g., `"127.0.0.1:8125"`, `"[::1]:8125"`, or `"localhost:8125"`).
+    /// Dual-stack hostnames prefer IPv4 for compatibility with IPv4-only agents.
+    /// IPv6 literals and IPv6-only hostnames use IPv6. UDP connect cannot verify
+    /// that an agent is listening; successful sends are not delivery acknowledgments.
     pub fn udp(addr: impl Into<String>) -> StatsdExporterBuilder {
         StatsdExporterBuilder {
             target: StatsdTarget::Udp(addr.into()),
@@ -316,6 +319,14 @@ impl StatsdExporter {
     }
 
     fn send_lines(&self, lines: impl IntoIterator<Item = String>) -> Result<(), ExportError> {
+        self.send_lines_with(lines, |data| self.send_buffer(data))
+    }
+
+    fn send_lines_with(
+        &self,
+        lines: impl IntoIterator<Item = String>,
+        mut send: impl FnMut(&str) -> Result<(), ExportError>,
+    ) -> Result<(), ExportError> {
         let mut buffer = self.buffer.lock();
         buffer.clear();
 
@@ -332,7 +343,9 @@ impl StatsdExporter {
                 continue;
             }
             if !buffer.is_empty() && buffer.len() + 1 + line.len() > self.max_buffer_size {
-                self.send_buffer(&buffer)?;
+                if let Err(error) = send(&buffer) {
+                    rejected.get_or_insert(error);
+                }
                 buffer.clear();
             }
             if !buffer.is_empty() {
@@ -341,8 +354,10 @@ impl StatsdExporter {
             buffer.push_str(&line);
         }
 
-        if !buffer.is_empty() {
-            self.send_buffer(&buffer)?;
+        if !buffer.is_empty()
+            && let Err(error) = send(&buffer)
+        {
+            rejected.get_or_insert(error);
         }
 
         match rejected {
@@ -373,7 +388,11 @@ impl StatsdExporter {
                     last_inode.store(current_inode, Ordering::Relaxed);
                 }
                 let result = guard.as_ref().expect("connected socket").send(bytes);
-                if result.is_err() {
+                // A full receiver queue does not invalidate this connection.
+                // Reconnecting for each later datagram would amplify backpressure.
+                if let Err(error) = &result
+                    && error.kind() != io::ErrorKind::WouldBlock
+                {
                     *guard = None;
                 }
                 result
@@ -388,11 +407,19 @@ impl StatsdExporter {
 }
 
 fn connect_udp(destination: &str) -> io::Result<UdpSocket> {
+    connect_udp_addresses(destination.to_socket_addrs()?)
+}
+
+fn connect_udp_addresses(addresses: impl IntoIterator<Item = SocketAddr>) -> io::Result<UdpSocket> {
+    // UDP connect is local setup, not a probe for a listening receiver. Preserve
+    // IPv4 hostname behavior while allowing explicit or IPv6-only destinations.
+    let mut addresses: Vec<_> = addresses.into_iter().collect();
+    addresses.sort_by_key(|address| address.is_ipv6());
     let mut last_error = io::Error::new(
         io::ErrorKind::AddrNotAvailable,
         "UDP destination resolved to no addresses",
     );
-    for address in destination.to_socket_addrs()? {
+    for address in addresses {
         let bind_address = if address.is_ipv4() {
             "0.0.0.0:0"
         } else {
@@ -464,6 +491,140 @@ impl Exporter for StatsdExporter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn udp_prefers_ipv4_even_when_ipv6_is_resolved_first() {
+        let ipv4 = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let first = ipv4.local_addr().unwrap();
+        let ipv6 = SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], first.port()));
+        let later_ipv4 = SocketAddr::from(([127, 0, 0, 2], first.port()));
+        let socket = connect_udp_addresses([ipv6, first, later_ipv4]).unwrap();
+        assert_eq!(socket.peer_addr().unwrap(), first);
+        socket.send(b"latency:1:99|d").unwrap();
+        ipv4.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let mut buffer = [0; 64];
+        let n = ipv4.recv(&mut buffer).unwrap();
+        assert_eq!(&buffer[..n], b"latency:1:99|d");
+    }
+
+    #[test]
+    fn udp_supports_ipv6_only_resolution_and_empty_resolution_errors() {
+        let ipv6 = UdpSocket::bind("[::1]:0").unwrap();
+        let address = ipv6.local_addr().unwrap();
+        assert_eq!(
+            connect_udp_addresses([address])
+                .unwrap()
+                .peer_addr()
+                .unwrap(),
+            address
+        );
+        assert_eq!(
+            connect_udp_addresses([]).unwrap_err().kind(),
+            io::ErrorKind::AddrNotAvailable
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn uds_backpressure_retains_connection_and_recovers_after_drain() {
+        use std::os::fd::AsRawFd;
+        let path = std::env::temp_dir().join(format!(
+            "chalk-metrics-{}-backpressure.sock",
+            std::process::id()
+        ));
+        let listener = UnixDatagram::bind(&path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let exporter = StatsdExporter::uds(&path).build().unwrap();
+        let socket_fd = || {
+            let Socket::Uds { socket, .. } = &exporter.socket else {
+                unreachable!()
+            };
+            socket
+                .lock()
+                .as_ref()
+                .expect("connection must be retained")
+                .as_raw_fd()
+        };
+        let original_fd = socket_fd();
+        let mut blocked = false;
+        for _ in 0..4096 {
+            if let Err(error) = exporter.send_buffer("x:1|d") {
+                assert_eq!(
+                    error
+                        .source
+                        .unwrap()
+                        .downcast_ref::<io::Error>()
+                        .unwrap()
+                        .kind(),
+                    io::ErrorKind::WouldBlock
+                );
+                blocked = true;
+                break;
+            }
+        }
+        assert!(blocked, "receiver must actually exert backpressure");
+        for _ in 0..3 {
+            assert!(exporter.send_buffer("x:2|d").is_err());
+            assert_eq!(socket_fd(), original_fd);
+        }
+        let mut buffer = [0; 64];
+        while listener.recv(&mut buffer).is_ok() {}
+        exporter.send_buffer("x:99|d").unwrap();
+        assert_eq!(socket_fd(), original_fd);
+        let n = listener.recv(&mut buffer).unwrap();
+        assert_eq!(&buffer[..n], b"x:99|d");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn uds_permanent_send_error_clears_connection_and_reconnects() {
+        let path = std::env::temp_dir().join(format!(
+            "chalk-metrics-{}-reconnect.sock",
+            std::process::id()
+        ));
+        let listener = UnixDatagram::bind(&path).unwrap();
+        let exporter = StatsdExporter::uds(&path).build().unwrap();
+        drop(listener);
+        std::fs::remove_file(&path).unwrap();
+        assert!(exporter.send_buffer("x:1|d").is_err());
+        let Socket::Uds { socket, .. } = &exporter.socket else {
+            unreachable!()
+        };
+        assert!(socket.lock().is_none());
+        let replacement = UnixDatagram::bind(&path).unwrap();
+        replacement
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        exporter.send_buffer("x:99|d").unwrap();
+        let mut buffer = [0; 64];
+        let n = replacement.recv(&mut buffer).unwrap();
+        assert_eq!(&buffer[..n], b"x:99|d");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn failed_datagram_does_not_skip_later_packets_or_replay_successes() {
+        let exporter = StatsdExporter::udp("127.0.0.1:8125")
+            .max_buffer_size(5)
+            .build()
+            .unwrap();
+        let mut attempted = Vec::new();
+        let result = exporter.send_lines_with(
+            ["x:1|d".to_owned(), "x:2|d".to_owned(), "x:3|d".to_owned()],
+            |packet| {
+                attempted.push(packet.to_owned());
+                if attempted.len() == 2 {
+                    Err(ExportError::new("injected send failure"))
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(result.unwrap_err().message, "injected send failure");
+        assert_eq!(attempted, ["x:1|d", "x:2|d", "x:3|d"]);
+    }
     use crate::aggregator::sketch::UDDSketch;
     use crate::aggregator::striped_map::TagsData;
     use std::sync::Arc;

@@ -47,6 +47,7 @@ impl std::error::Error for AlreadyInitializedError {}
 pub struct MetricsClientBuilder {
     exporters: Vec<Box<dyn Exporter>>,
     flush_interval: Duration,
+    raw_sample_flush_interval: Duration,
     worker_threads: usize,
     max_buckets: u64,
     initial_error: f64,
@@ -59,6 +60,7 @@ impl MetricsClientBuilder {
         Self {
             exporters: Vec::new(),
             flush_interval: Duration::from_secs(10),
+            raw_sample_flush_interval: Duration::from_millis(100),
             worker_threads: 1,
             max_buckets: 200,
             initial_error: 0.001,
@@ -73,10 +75,26 @@ impl MetricsClientBuilder {
         self
     }
 
-    /// Set the flush interval (default: 10 seconds).
+    /// Set the counter, gauge, and sketch flush interval (default: 10 seconds).
+    /// Raw observations use `raw_sample_flush_interval` independently.
     pub fn flush_interval(mut self, interval: Duration) -> Self {
         assert!(!interval.is_zero(), "flush interval must be positive");
         self.flush_interval = interval;
+        self
+    }
+
+    /// Set the raw-observation export interval (default: 100 milliseconds),
+    /// independently of the counter, gauge, and sketch flush interval.
+    /// Sequential or slow exporters can extend this latency.
+    ///
+    /// # Panics
+    /// Panics if the interval is zero.
+    pub fn raw_sample_flush_interval(mut self, interval: Duration) -> Self {
+        assert!(
+            !interval.is_zero(),
+            "raw sample flush interval must be positive"
+        );
+        self.raw_sample_flush_interval = interval;
         self
     }
 
@@ -185,6 +203,7 @@ impl MetricsClientBuilder {
             Arc::clone(&aggregator),
             exporters,
             self.flush_interval,
+            self.raw_sample_flush_interval,
             self.worker_threads,
             Arc::clone(&shutdown_notify),
             raw_receiver,
