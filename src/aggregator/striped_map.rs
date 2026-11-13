@@ -32,6 +32,7 @@ enum AggSlot {
     Count(CountSlot),
     Gauge(GaugeSlot),
     Histogram(HistogramSlot),
+    RawDistribution,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -66,6 +67,7 @@ pub struct StripedAggMap {
     stripes: Box<[Stripe]>,
     max_buckets: u64,
     initial_error: f64,
+    aggregate_histograms: bool,
     raw_sender: Option<tokio::sync::mpsc::Sender<RawDistributionPoint>>,
 }
 
@@ -82,8 +84,14 @@ impl StripedAggMap {
             stripes: stripes.into_boxed_slice(),
             max_buckets,
             initial_error,
+            aggregate_histograms: raw_sender.is_none(),
             raw_sender,
         }
+    }
+
+    pub(crate) fn with_histogram_aggregation(mut self, enabled: bool) -> Self {
+        self.aggregate_histograms = enabled;
+        self
     }
 
     #[inline]
@@ -231,48 +239,45 @@ impl StripedAggMap {
         make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
         value: f64,
     ) {
+        let combined = combine_hash(name.hash(), tags_hash);
         let metric_name = name.as_str();
-        match &self.raw_sender {
-            Some(sender) => {
-                let tags = Arc::new(TagsData { pairs: make_tags() });
-                let _ = sender.try_send(RawDistributionPoint {
-                    namespace,
-                    metric_name,
-                    tags,
-                    value,
-                });
-            }
-            None => {
-                let combined = combine_hash(name.hash(), tags_hash);
-                let stripe_idx = combined as usize & STRIPE_MASK;
-                let mut guard = self.stripes[stripe_idx].lock();
-
-                let entry = guard.entry(SeriesKey {
-                    fingerprint: combined,
-                    namespace,
-                    metric_name,
-                    tags_hash,
-                    kind: MetricKind::Histogram,
-                });
-
-                match entry {
-                    hashbrown::hash_map::Entry::Occupied(e) => {
-                        if let AggSlot::Histogram(ref slot) = e.get().1 {
-                            slot.record(value);
-                        }
-                    }
-                    hashbrown::hash_map::Entry::Vacant(e) => {
-                        let slot = HistogramSlot::new(self.max_buckets, self.initial_error);
-                        slot.record(value);
-                        let key = AggKey {
-                            namespace,
-                            metric_name,
-                            tags_data: Arc::new(TagsData { pairs: make_tags() }),
-                        };
-                        e.insert((key, AggSlot::Histogram(slot)));
-                    }
-                }
-            }
+        let stripe_idx = combined as usize & STRIPE_MASK;
+        let mut guard = self.stripes[stripe_idx].lock();
+        let (key, slot) = guard
+            .entry(SeriesKey {
+                fingerprint: combined,
+                namespace,
+                metric_name,
+                tags_hash,
+                kind: MetricKind::Histogram,
+            })
+            .or_insert_with(|| {
+                let slot = if self.aggregate_histograms {
+                    AggSlot::Histogram(HistogramSlot::new(self.max_buckets, self.initial_error))
+                } else {
+                    AggSlot::RawDistribution
+                };
+                (
+                    AggKey {
+                        namespace,
+                        metric_name,
+                        tags_data: Arc::new(TagsData { pairs: make_tags() }),
+                    },
+                    slot,
+                )
+            });
+        if let AggSlot::Histogram(slot) = slot {
+            slot.record(value);
+        }
+        let tags = self.raw_sender.as_ref().map(|_| Arc::clone(&key.tags_data));
+        drop(guard);
+        if let (Some(sender), Some(tags)) = (&self.raw_sender, tags) {
+            let _ = sender.try_send(RawDistributionPoint {
+                namespace,
+                metric_name,
+                tags,
+                value,
+            });
         }
     }
 
@@ -282,6 +287,7 @@ impl StripedAggMap {
         for stripe in self.stripes.iter() {
             let mut guard = stripe.lock();
             guard.retain(|_combined, (key, slot)| match slot {
+                AggSlot::RawDistribution => false,
                 AggSlot::Count(count_slot) => {
                     let value = count_slot.flush();
                     flushed.push(FlushedMetric {
@@ -560,10 +566,9 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let map = StripedAggMap::new(200, 0.001, Some(tx));
 
-        // Passthrough mode never touches the aggregation map, so make_tags is
-        // called fresh on every record (no cached Arc<TagsData> to reuse).
+        // Raw-only entries cache tags but do not allocate histogram sketches.
         map.record_histogram("test_hist", &[], 789, || vec![("k", "v".into())], 1.0);
-        map.record_histogram("test_hist", &[], 789, || vec![("k", "v".into())], 2.0);
+        map.record_histogram("test_hist", &[], 789, || panic!("tags cached"), 2.0);
 
         // The sketch is bypassed entirely in passthrough mode, so flush() has nothing to emit.
         let flushed = map.flush();

@@ -31,12 +31,8 @@ pub struct FlushedMetric {
     pub value: FlushedValue,
 }
 
-/// A single raw histogram value recorded when `aggregate_distr_metrics(false)`
-/// is set on the client, bypassing sketch aggregation for this data point.
-///
-/// `tags` is the same `Arc<TagsData>` cached by the striped aggregation map
-/// for this metric's key, so producing one of these does not allocate beyond
-/// the first-seen tag combination.
+/// A single original histogram observation, delivered to raw-sample exporters.
+/// Tags are shared with the aggregation entry for this series and flush period.
 #[derive(Debug)]
 pub struct RawDistributionPoint {
     pub namespace: &'static [&'static str],
@@ -89,6 +85,31 @@ impl ExportError {
     }
 }
 
+/// Histogram representation required by an exporter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DistributionInput {
+    /// A histogram sketch containing every recorded observation.
+    Sketch,
+    /// Individual observations, subject to the bounded raw-sample queue.
+    Raw,
+    /// Both representations, delivered through their respective export methods.
+    Both,
+}
+
+impl DistributionInput {
+    pub(crate) fn wants_raw(self) -> bool {
+        matches!(self, Self::Raw | Self::Both)
+    }
+    pub(crate) fn wants_sketch(self) -> bool {
+        matches!(self, Self::Sketch | Self::Both)
+    }
+}
+
+pub(crate) struct ConfiguredExporter {
+    pub exporter: Box<dyn Exporter>,
+    pub input: DistributionInput,
+}
+
 /// Trait for exporting aggregated metrics to an external system.
 ///
 /// Implementors receive a slice of [`FlushedMetric`] on each flush interval
@@ -96,21 +117,29 @@ impl ExportError {
 /// (e.g., StatsD, Prometheus, custom backends).
 ///
 /// The trait is async to support network-bound exporters. The flush worker
-/// calls all registered exporters concurrently.
+/// calls registered exporters sequentially; increasing runtime threads does not
+/// change this ordering.
 #[async_trait::async_trait]
 #[allow(
     clippy::double_must_use,
     reason = "async_trait annotates its generated boxed futures"
 )]
 pub trait Exporter: Send + Sync {
+    /// Declare histogram requirements. Built-in exporters select this automatically.
+    ///
+    /// `None` preserves custom exporter compatibility: sketches by default, or raw
+    /// samples with the deprecated `aggregate_distr_metrics(false)` setting.
+    fn distribution_input(&self) -> Option<DistributionInput> {
+        None
+    }
+
     /// Export the given batch of flushed metrics.
     ///
     /// Called once per flush interval with all metrics that were aggregated
     /// since the last flush. Errors are logged but do not halt the flush loop.
     async fn export(&self, metrics: &[FlushedMetric]) -> Result<(), ExportError>;
 
-    /// Export raw, unaggregated distribution points recorded while
-    /// `aggregate_distr_metrics(false)` is set on the client.
+    /// Export original observations when this exporter requests raw samples.
     ///
     /// Default is a no-op; only exporters that support per-event distribution
     /// fidelity (e.g. StatsD) need to override this.

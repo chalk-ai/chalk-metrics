@@ -6,7 +6,7 @@ use tokio::sync::Notify;
 
 use crate::__private::MetricName;
 use crate::aggregator::striped_map::StripedAggMap;
-use crate::export::Exporter;
+use crate::export::{ConfiguredExporter, DistributionInput, Exporter};
 use crate::worker;
 
 static GLOBAL: OnceLock<MetricsClient> = OnceLock::new();
@@ -95,9 +95,12 @@ impl MetricsClientBuilder {
         self
     }
 
-    /// Set whether histogram values are aggregated into a sketch before export
-    /// (default: `true`). Set to `false` to additionally emit each raw value
-    /// as an individual point, bypassing aggregation for StatsD distribution fidelity.
+    /// Legacy fallback for custom exporters without an explicit distribution input.
+    /// Built-in exporters always choose the representation they require. Remove
+    /// this call for built-ins; custom exporters should implement `distribution_input`.
+    #[deprecated(
+        note = "exporters select distribution input automatically; custom exporters should implement distribution_input"
+    )]
     pub fn aggregate_distr_metrics(mut self, enabled: bool) -> Self {
         self.aggregate_distr_metrics = enabled;
         self
@@ -130,23 +133,39 @@ impl MetricsClientBuilder {
     }
 
     fn build_inner(self) -> MetricsClient {
-        let (raw_sender, raw_receiver) = if self.aggregate_distr_metrics {
-            (None, None)
+        let fallback = if self.aggregate_distr_metrics {
+            DistributionInput::Sketch
         } else {
+            DistributionInput::Raw
+        };
+        let exporters: Vec<_> = self
+            .exporters
+            .into_iter()
+            .map(|exporter| {
+                let input = exporter.distribution_input().unwrap_or(fallback);
+                ConfiguredExporter { exporter, input }
+            })
+            .collect();
+        // No-exporter clients retain the local flush/legacy recording behavior.
+        let wants_raw = exporters.iter().any(|e| e.input.wants_raw())
+            || (exporters.is_empty() && fallback.wants_raw());
+        let wants_sketch = exporters.iter().any(|e| e.input.wants_sketch())
+            || (exporters.is_empty() && fallback.wants_sketch());
+        let (raw_sender, raw_receiver) = if wants_raw {
             let (tx, rx) = tokio::sync::mpsc::channel(RAW_POINT_CHANNEL_CAPACITY);
             (Some(tx), Some(rx))
+        } else {
+            (None, None)
         };
-
-        let aggregator = Arc::new(StripedAggMap::new(
-            self.max_buckets,
-            self.initial_error,
-            raw_sender,
-        ));
+        let aggregator = Arc::new(
+            StripedAggMap::new(self.max_buckets, self.initial_error, raw_sender)
+                .with_histogram_aggregation(wants_sketch),
+        );
         let shutdown_notify = Arc::new(Notify::new());
 
         let handle = worker::spawn_flush_worker(
             Arc::clone(&aggregator),
-            self.exporters,
+            exporters,
             self.flush_interval,
             self.worker_threads,
             Arc::clone(&shutdown_notify),
@@ -346,6 +365,7 @@ impl MetricsClient {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::export::{ExportError, FlushedMetric};

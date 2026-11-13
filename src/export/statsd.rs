@@ -7,7 +7,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 
-use super::{ExportError, Exporter, FlushedMetric, FlushedValue, RawDistributionPoint};
+use super::{
+    DistributionInput, ExportError, Exporter, FlushedMetric, FlushedValue, RawDistributionPoint,
+};
 
 /// How histogram (UDD Sketch) data should be emitted over StatsD.
 #[derive(Debug, Clone)]
@@ -190,7 +192,9 @@ impl StatsdExporter {
                 }
                 FlushedValue::Histogram(sketch) => match &self.histogram_mode {
                     HistogramExportMode::Distribution => {
-                        lines.push(format_distribution_line(&name, sketch.mean(), &tags));
+                        return Err(ExportError::new(
+                            "Distribution requires original samples; use MetricsClient or export_raw_points",
+                        ));
                     }
                     HistogramExportMode::Percentiles(percentiles) => {
                         let count = sketch.count();
@@ -212,6 +216,11 @@ impl StatsdExporter {
 
     /// Format raw distribution points into batched DogStatsD datagrams and send them.
     fn send_raw_points(&self, points: &[RawDistributionPoint]) -> Result<(), ExportError> {
+        if !matches!(self.histogram_mode, HistogramExportMode::Distribution) {
+            return Err(ExportError::new(
+                "Percentiles requires histogram sketches, not raw distribution samples",
+            ));
+        }
         let lines = points.iter().map(|point| {
             let name = self.full_name(point.namespace, point.metric_name);
             let tags = self.format_tags(&point.tags.pairs);
@@ -302,6 +311,13 @@ fn get_inode(path: &Path) -> io::Result<u64> {
 
 #[async_trait::async_trait]
 impl Exporter for StatsdExporter {
+    fn distribution_input(&self) -> Option<DistributionInput> {
+        Some(match self.histogram_mode {
+            HistogramExportMode::Distribution => DistributionInput::Raw,
+            HistogramExportMode::Percentiles(_) => DistributionInput::Sketch,
+        })
+    }
+
     async fn export(&self, metrics: &[FlushedMetric]) -> Result<(), ExportError> {
         self.send_metrics(metrics)
     }
@@ -499,24 +515,22 @@ mod tests {
     }
 
     #[test]
-    fn test_format_histogram_distribution() {
-        let exp = FormatOnlyExporter {
-            namespace: None,
-            default_tags: vec![],
-            histogram_mode: HistogramExportMode::Distribution,
-        };
-
+    fn distribution_rejects_sketches_instead_of_exporting_the_mean() {
+        let listener = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let exp = StatsdExporter::udp(listener.local_addr().unwrap().to_string())
+            .histogram_mode(HistogramExportMode::Distribution)
+            .build()
+            .unwrap();
         let mut sketch = UDDSketch::new(200, 0.001);
-        sketch.add_value(42.0);
-
-        let metric = FlushedMetric {
+        sketch.add_value(1.0);
+        sketch.add_value(99.0);
+        let result = exp.send_metrics(&[FlushedMetric {
             namespace: &[],
             metric_name: "latency",
             tags: make_tags(vec![]),
             value: FlushedValue::Histogram(sketch),
-        };
-        let lines = exp.format_metric(&metric);
-        assert_eq!(lines, vec!["latency:42|d"]);
+        }]);
+        assert!(result.unwrap_err().message.contains("original samples"));
     }
 
     #[test]
@@ -541,7 +555,10 @@ mod tests {
             .unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let exp = StatsdExporter::udp(addr.to_string()).build().unwrap();
+        let exp = StatsdExporter::udp(addr.to_string())
+            .histogram_mode(HistogramExportMode::Distribution)
+            .build()
+            .unwrap();
 
         let points = vec![RawDistributionPoint {
             namespace: &[],
@@ -565,6 +582,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
 
         let exp = StatsdExporter::udp(addr.to_string())
+            .histogram_mode(HistogramExportMode::Distribution)
             .max_buffer_size(64)
             .build()
             .unwrap();

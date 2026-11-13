@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 use std::borrow::Cow;
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};

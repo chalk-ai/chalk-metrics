@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use super::{ExportError, Exporter, FlushedMetric, FlushedValue};
+use super::{DistributionInput, ExportError, Exporter, FlushedMetric, FlushedValue};
 
 /// Default histogram bucket boundaries for Prometheus exposition format.
 pub const DEFAULT_BUCKET_BOUNDARIES: &[f64] = &[
@@ -186,6 +186,10 @@ fn format_le(le: f64) -> String {
 
 #[async_trait::async_trait]
 impl Exporter for PrometheusExporter {
+    fn distribution_input(&self) -> Option<DistributionInput> {
+        Some(DistributionInput::Sketch)
+    }
+
     async fn export(&self, metrics: &[FlushedMetric]) -> Result<(), ExportError> {
         let text = self.render(metrics);
         *self.latest.write() = text;

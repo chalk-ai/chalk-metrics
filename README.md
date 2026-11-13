@@ -300,6 +300,26 @@ let statsd = StatsdExporter::uds("/var/run/datadog/dsd.socket")
 
 Namespace segments are joined with `.`: `myapp.http.request_count`.
 
+`HistogramExportMode::Distribution` automatically requests each original sample;
+it never substitutes a sketch's mean. Prometheus and StatsD `Percentiles` request
+sketches. Registering both kinds records both representations, and each exporter
+receives only its requested histogram input. Counts and gauges are exported once
+per destination. Direct Distribution users must call `export_raw_points`;
+passing histogram sketches to `export` returns an error because original samples
+cannot be reconstructed from a sketch.
+
+### Migrating the global distribution toggle
+
+Existing `init()`, `try_init()`, and `build_local()` calls remain valid. Remove
+`.aggregate_distr_metrics(...)` when using built-in exporters: their requirements
+now take precedence over either legacy setting. The method is deprecated and
+remains a fallback only for custom exporters whose `distribution_input()` returns
+`None`: `true` selects sketches and `false` selects raw points, as before.
+
+Custom raw exporters should return `Some(DistributionInput::Raw)` from
+`distribution_input()` and implement `export_raw_points`. Sketch exporters can
+return `Some(DistributionInput::Sketch)`; `Both` explicitly requests both callbacks.
+
 ### Custom Exporters
 
 ```rust
