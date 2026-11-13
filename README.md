@@ -446,48 +446,13 @@ Run benchmarks with:
 cargo bench
 ```
 
-### Results
+Before/after results, reproduction commands, workload definitions, and the
+measurement environment are recorded in [adoption benchmarks](docs/adoption-benchmarks.md).
+[Machine-readable estimates](docs/benchmark-results.json) include the upstream
+baseline and each implementation stage.
 
-Measured on Apple M3 Max, 36 GB RAM, macOS Darwin 25.0.0 arm64, Rust 1.94.0.
-
-#### Aggregation Throughput (1,000 ops/iter)
-
-| Benchmark | Time/iter | Throughput |
-|---|---|---|
-| count/static_tags | 2.6 µs | ~388 M ops/s |
-| count/mixed_tags (80 combos) | 2.8 µs | ~366 M ops/s |
-| gauge/static_tags | 2.6 µs | ~390 M ops/s |
-| gauge/mixed_tags | 2.8 µs | ~365 M ops/s |
-| histogram/static_tags | 39 µs | ~25 M ops/s |
-| histogram/mixed_tags | 43 µs | ~23 M ops/s |
-
-#### Multi-Thread Contention (16,000 ops/iter)
-
-| Benchmark | Time/iter | Throughput |
-|---|---|---|
-| count/mixed, 2 threads | 376 µs | ~43 M ops/s |
-| count/mixed, 8 threads | 604 µs | ~26 M ops/s |
-| histogram/mixed, 2 threads | 1.1 ms | ~15 M ops/s |
-| histogram/mixed, 8 threads | 981 µs | ~16 M ops/s |
-
-#### Prometheus Export (mixed count/gauge/histogram)
-
-| Batch Size | 2 tags | 5 tags | 0 tags |
-|---|---|---|---|
-| 10 metrics | 53 µs | 55 µs | 48 µs |
-| 100 metrics | 565 µs | 593 µs | 520 µs |
-| 1,000 metrics | 5.7 ms | 6.0 ms | 5.4 ms |
-
-#### StatsD Export (mixed count/gauge/histogram)
-
-| Batch Size | Percentiles mode | Distribution mode |
-|---|---|---|
-| 10 metrics | 46 µs | 8 µs |
-| 100 metrics | 510 µs | 64 µs |
-| 1,000 metrics | 5.2 ms | 626 µs |
-
-**Notes:**
-- The historical numbers above predate the aggregation correctness fix. Recording takes a stripe lock; the slot atomics do not make the full recording path lock-free. See [adoption benchmarks](docs/adoption-benchmarks.md) for measured before/after results.
-- Histogram is slower (~39 ns/op) due to the parking_lot mutex protecting the UDD Sketch
-- StatsD distribution mode is ~8x faster than percentiles mode because it emits 1 line per metric instead of 6 (count + avg + 4 percentiles)
-- Mixed tags benchmarks rotate through 80 tag combinations to simulate realistic cardinality
+The report covers existing-series updates, forced map growth, contention,
+accepted raw-sample recording, real UDP export, and Prometheus rendering.
+Distribution benchmarks count individual observations. Growth timings are
+reported alongside the baseline's duplicate-entry failures, and the measured
+counter/gauge overhead is disclosed explicitly.

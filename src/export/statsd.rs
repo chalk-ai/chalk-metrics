@@ -12,14 +12,16 @@ use super::{
     DistributionInput, ExportError, Exporter, FlushedMetric, FlushedValue, RawDistributionPoint,
 };
 
-/// How histogram (UDD Sketch) data should be emitted over StatsD.
+/// How recorded histogram observations should be exported over StatsD.
 #[derive(Debug, Clone)]
 pub enum HistogramExportMode {
     /// Emit summary statistics as separate gauge metrics with a `.percentile` suffix.
     /// The `Vec<f64>` contains the percentiles to emit (e.g., `[0.5, 0.9, 0.95, 0.99]`).
     /// Also emits `.count` and `.avg`.
     Percentiles(Vec<f64>),
-    /// Emit as a DogStatsD distribution (`|d`). Only works with Datadog agent.
+    /// Emit original observations as a DogStatsD distribution (`|d`). Only works
+    /// with a Datadog agent. MetricsClient routes raw samples automatically;
+    /// direct callers must use `Exporter::export_raw_points`, not sketches.
     Distribution,
 }
 
