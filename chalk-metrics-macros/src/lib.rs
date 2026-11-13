@@ -543,8 +543,8 @@ fn expand_metric(
             /// Record a count delta.
             pub fn record_value(&self, value: i64) {
                 let hash = self.tags_hash();
-                chalk_metrics::client::record_count(
-                    Self::NAME,
+                chalk_metrics::client::record_count_named(
+                    Self::METRIC_NAME,
                     Self::namespace(),
                     hash,
                     || self.export_pairs(),
@@ -556,8 +556,8 @@ fn expand_metric(
             /// Record a gauge value.
             pub fn record(&self, value: f64) {
                 let hash = self.tags_hash();
-                chalk_metrics::client::record_gauge(
-                    Self::NAME,
+                chalk_metrics::client::record_gauge_named(
+                    Self::METRIC_NAME,
                     Self::namespace(),
                     hash,
                     || self.export_pairs(),
@@ -569,8 +569,8 @@ fn expand_metric(
             /// Record a histogram observation.
             pub fn record(&self, value: f64) {
                 let hash = self.tags_hash();
-                chalk_metrics::client::record_histogram(
-                    Self::NAME,
+                chalk_metrics::client::record_histogram_named(
+                    Self::METRIC_NAME,
                     Self::namespace(),
                     hash,
                     || self.export_pairs(),
@@ -632,6 +632,9 @@ fn expand_metric(
         impl #ident {
             /// The metric name without namespace segments.
             pub const NAME: &'static str = #name;
+
+            const METRIC_NAME: chalk_metrics::__private::MetricName =
+                chalk_metrics::__private::MetricName::new(Self::NAME);
 
             /// The namespace path. Empty for top-level metrics.
             #[inline]

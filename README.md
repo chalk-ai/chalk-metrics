@@ -2,13 +2,13 @@
 
 Efficient metrics aggregation with Rust macro definitions and pluggable exporters.
 
-Define your metrics in Rust macro files, then record metrics with zero-allocation hot-path performance. Each metric is a struct — call `.record()` and the value type is enforced at compile time.
+Define your metrics in Rust macro files, then record metrics with low overhead and cached tag data. Each metric is a struct — call `.record()` and the value type is enforced at compile time.
 
 ## Features
 
 - **Type-safe recording**: Each metric is a struct with `.record(value)`. Count metrics accept `i64` (or no arg for +1), gauge/histogram accept `f64`. Wrong type = compile error.
 - **Hierarchical namespaces**: Define namespace marker types, including optional parent namespaces. Exporters receive namespace segments and format them (Prometheus uses `_`, StatsD uses `.`).
-- **Zero-allocation hot path**: Striped `parking_lot` locks with `hashbrown::RawEntryMut` — only allocates on first-seen tag combinations.
+- **Cached series tags**: Striped `parking_lot` locks with consistent `hashbrown::HashMap::entry` operations. Existing entries reuse tag data; raw observations use a bounded queue.
 - **Pluggable exporters**: Prometheus text format and StatsD/DogStatsD included, plus an async `Exporter` trait for custom backends.
 - **Singleton client**: `env_logger`-style `init()`/`try_init()` with automatic shutdown via `atexit`.
 
@@ -300,6 +300,66 @@ let statsd = StatsdExporter::uds("/var/run/datadog/dsd.socket")
 
 Namespace segments are joined with `.`: `myapp.http.request_count`.
 
+`HistogramExportMode::Distribution` automatically requests each original sample;
+it never substitutes a sketch's mean. Prometheus and StatsD `Percentiles` request
+sketches. Registering both kinds records both representations, and each exporter
+receives only its requested histogram input. Counts and gauges are exported once
+per destination. Direct Distribution users must call `export_raw_points`;
+passing histogram sketches to `export` rejects those sketches because original
+samples cannot be reconstructed. Valid counters and gauges in the same batch are
+still sent, and the call returns an error. Do not retry the whole batch blindly:
+some metrics may already have been delivered.
+
+Distribution export packs values with identical namespace, name, and tags into
+DogStatsD protocol v1.1 messages, for example `latency:1:99|d`. Both observations
+are preserved, including repeated values. Packed messages split at the datagram
+byte limit. This requires Datadog Agent 6.25+ (6.x) or 7.25+; use
+`.distribution_value_packing(false)` on the exporter for older agents.
+
+Compared with the former mean-only default, correct Distribution export sends
+one observation per recording call. Packing reduces repeated names and tags,
+but payload size and agent processing still grow with sample rate. It does not
+increase the number of distinct series when names and tags are unchanged.
+StatsD `Percentiles` remains the default and uses local sketches; its per-process
+percentiles cannot be merged into a global percentile. Sampling is not implicit.
+Packing can add CPU without reducing bytes when each series has only one sample
+per batch. It can also be disabled for these workloads. See the measured traffic,
+latency, queue loss, and CPU tradeoffs in [distribution volume benchmarks](docs/distribution-volume.md).
+
+### Migrating the global distribution toggle
+
+Existing `init()`, `try_init()`, and `build_local()` calls remain valid. The global
+`.aggregate_distr_metrics(...)` method is deprecated. For compatibility, legacy
+`false` with a StatsD exporter whose histogram mode was never explicitly set
+still emits original `name:v|d` observations (packed by default), preserving metric
+names and types. Without that legacy setting, StatsD still defaults to Percentiles.
+
+Before removing legacy `false`, explicitly select the equivalent exporter mode:
+
+```rust
+let exporter = StatsdExporter::udp("localhost:8125")
+    .histogram_mode(HistogramExportMode::Distribution)
+    .build()?;
+// Register exporter and remove .aggregate_distr_metrics(false).
+```
+
+An explicit `histogram_mode(...)` always wins, including explicit Percentiles with
+legacy `false`. Previously that combination emitted raw `name:v|d` observations;
+it now emits `name.count`, `name.avg`, and `name.p50` (etc.) gauges. Select Distribution
+to retain the old names and types. Prometheus always receives sketches, even with
+legacy `false`, so mixed exporters retain both representations. The legacy setting
+remains the fallback for custom exporters whose `distribution_input()` returns
+`None`: `true` selects sketches and `false` selects raw points, as before.
+
+This preserves source initialization APIs and the common legacy default-StatsD
+configuration. Deliberate behavior changes remain: Distribution preserves every
+observation instead of substituting a mean, explicit modes are honored, and direct
+sketch-to-Distribution export returns an error. See [release notes](CHANGELOG.md).
+
+Custom raw exporters should return `Some(DistributionInput::Raw)` from
+`distribution_input()` and implement `export_raw_points`. Sketch exporters can
+return `Some(DistributionInput::Sketch)`; `Both` explicitly requests both callbacks.
+
 ### Custom Exporters
 
 ```rust
@@ -329,10 +389,57 @@ chalk_metrics::client::builder()
     .worker_threads(1)               // tokio runtime threads (default: 1)
     .max_buckets(200)                // histogram max buckets
     .initial_error(0.001)            // histogram error bound
+    .raw_sample_queue_capacity(16_384) // queued original observations
+    .raw_sample_flush_interval(Duration::from_millis(100))
     .init();                         // or .try_init() for Result
 ```
 
-Shutdown happens automatically via `atexit`, or explicitly via `chalk_metrics::client::shutdown()`.
+### Flush latency, overflow, and shutdown
+
+Counters, gauges, and sketches are exported on `flush_interval` (default 10
+seconds). Original observations use a separate `raw_sample_flush_interval`
+(default 100 milliseconds, must be positive). Both timers skip their immediate
+startup tick. Allow up to the relevant interval plus scheduling and exporter
+execution time. Slow exporters can extend either latency because calls are
+sequential, even with multiple runtime threads. A custom `Both` exporter receives
+independent raw and aggregate windows. Increasing `worker_threads` does not
+parallelize exporter calls.
+
+The shared raw-sample queue defaults to 16,384 observations and can be sized with
+`raw_sample_queue_capacity(n)` (`n > 0`). Size it for peak sample rate times the
+raw interval plus slow-exporter headroom and bursts. Packing reduces wire bytes,
+not queue occupancy: each observation still occupies one slot. Recording never
+waits for space:
+overflow drops the newest raw sample. `client.dropped_raw_samples()` (local clients) or
+`chalk_metrics::client::dropped_raw_samples()` (global client) counts full or
+closed queue rejections. Sketch consumers still include these observations.
+This counter does not include network failures.
+
+UDP accepts IPv4, bracketed IPv6, and hostnames with ports. Dual-stack hostnames
+prefer IPv4, preserving `localhost` delivery to IPv4-only agents. Explicit IPv6
+and IPv6-only hostnames use IPv6. Address selection cannot detect which UDP
+receiver is listening. Datagram limits are 1432 bytes for UDP and 8192 for UDS by default, configurable with
+`max_buffer_size(n)` (`n > 0`). Limits include UTF-8 bytes and newline separators.
+A line larger than the limit is rejected without splitting it; valid sibling
+lines are sent and the batch returns an error. Send failures are returned to
+direct callers and logged by the worker. A failed send does not prevent attempts
+to send later datagrams in the batch; earlier successes are not replayed. A batch
+error can therefore mean partial delivery. There are no delivery acknowledgments
+or retries, and successful UDP sends do not guarantee receiver delivery. UDS
+connections retain their socket on `WouldBlock` (receiver backpressure); that
+send fails without a retry. Other send failures clear the connection so a later
+datagram can reconnect. Socket replacement also triggers reconnection.
+
+Stop and join metric-producing threads, then call the local client's
+`shutdown()` or global `chalk_metrics::client::shutdown()`. Shutdown closes the
+raw queue, exports pending aggregates and accepted raw samples, and joins the
+worker; it is idempotent and blocks on exporter completion. Do not call it from
+an exporter callback. Local clients require explicit shutdown. The global client
+also registers an `atexit` handler, but abrupt termination, signals, and process
+aborts can bypass it. Recording after shutdown is unsupported.
+
+Tenant identity, required service tags, and service-specific tag validation
+remain the consumer's responsibility; the shared client does not infer them.
 
 ## Benchmarks
 
@@ -342,48 +449,21 @@ Run benchmarks with:
 cargo bench
 ```
 
-### Results
+Before/after results, reproduction commands, workload definitions, and the
+measurement environment are recorded in [adoption benchmarks](docs/adoption-benchmarks.md).
+The latest [stack review results](docs/stack-review.md) compare upstream, the
+published stack, and this revision, including the name-hashing hypothesis and
+regression evidence.
+[Machine-readable estimates](docs/benchmark-results.json) include the upstream
+baseline and each implementation stage.
 
-Measured on Apple M3 Max, 36 GB RAM, macOS Darwin 25.0.0 arm64, Rust 1.94.0.
+The [distribution volume results](docs/distribution-volume.md) also compare the
+original upstream, the first published stack, and the revised stack with the
+same harness. They include payload bytes, datagrams, twelve-second paced loads,
+queue drops, latency, and process CPU; all received values are decoded.
 
-#### Aggregation Throughput (1,000 ops/iter)
-
-| Benchmark | Time/iter | Throughput |
-|---|---|---|
-| count/static_tags | 2.6 µs | ~388 M ops/s |
-| count/mixed_tags (80 combos) | 2.8 µs | ~366 M ops/s |
-| gauge/static_tags | 2.6 µs | ~390 M ops/s |
-| gauge/mixed_tags | 2.8 µs | ~365 M ops/s |
-| histogram/static_tags | 39 µs | ~25 M ops/s |
-| histogram/mixed_tags | 43 µs | ~23 M ops/s |
-
-#### Multi-Thread Contention (16,000 ops/iter)
-
-| Benchmark | Time/iter | Throughput |
-|---|---|---|
-| count/mixed, 2 threads | 376 µs | ~43 M ops/s |
-| count/mixed, 8 threads | 604 µs | ~26 M ops/s |
-| histogram/mixed, 2 threads | 1.1 ms | ~15 M ops/s |
-| histogram/mixed, 8 threads | 981 µs | ~16 M ops/s |
-
-#### Prometheus Export (mixed count/gauge/histogram)
-
-| Batch Size | 2 tags | 5 tags | 0 tags |
-|---|---|---|---|
-| 10 metrics | 53 µs | 55 µs | 48 µs |
-| 100 metrics | 565 µs | 593 µs | 520 µs |
-| 1,000 metrics | 5.7 ms | 6.0 ms | 5.4 ms |
-
-#### StatsD Export (mixed count/gauge/histogram)
-
-| Batch Size | Percentiles mode | Distribution mode |
-|---|---|---|
-| 10 metrics | 46 µs | 8 µs |
-| 100 metrics | 510 µs | 64 µs |
-| 1,000 metrics | 5.2 ms | 626 µs |
-
-**Notes:**
-- Count and gauge recording is ~2.6 µs per 1,000 ops (~2.6 ns/op) on the hot path thanks to lock-free atomics
-- Histogram is slower (~39 ns/op) due to the parking_lot mutex protecting the UDD Sketch
-- StatsD distribution mode is ~8x faster than percentiles mode because it emits 1 line per metric instead of 6 (count + avg + 4 percentiles)
-- Mixed tags benchmarks rotate through 80 tag combinations to simulate realistic cardinality
+The report covers existing-series updates, forced map growth, contention,
+accepted raw-sample recording, real UDP export, and Prometheus rendering.
+Distribution benchmarks count individual observations. Growth timings are
+reported alongside the baseline's duplicate-entry failures, and the measured
+counter/gauge overhead is disclosed explicitly.

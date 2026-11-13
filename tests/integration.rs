@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -100,7 +101,7 @@ fn test_multiple_exporters() {
         .flush_interval(Duration::from_millis(50))
         .build_local();
 
-    local.record_count("test", &[], 0, || vec![], 1);
+    local.record_count("test", &[], 0, Vec::new, 1);
 
     std::thread::sleep(Duration::from_millis(150));
     assert!(!collected.lock().is_empty());
@@ -156,7 +157,7 @@ fn test_histogram_quantile_accuracy() {
         .build_local();
 
     for i in 1..=1000 {
-        local.record_histogram("accuracy_test", &[], 0, || vec![], i as f64);
+        local.record_histogram("accuracy_test", &[], 0, Vec::new, i as f64);
     }
 
     let flushed = local.flush();
@@ -218,7 +219,7 @@ fn test_histogram_passthrough_end_to_end() {
 
     let expected = vec![10.0, 20.0, 30.0, 40.0, 50.0];
     for &v in &expected {
-        local.record_histogram("latency", &[], 0, || vec![], v);
+        local.record_histogram("latency", &[], 0, Vec::new, v);
     }
 
     std::thread::sleep(Duration::from_millis(200));
@@ -238,8 +239,8 @@ fn test_namespace_in_flushed_metrics() {
         .flush_interval(Duration::from_secs(60))
         .build_local();
 
-    local.record_count("request_count", &["http"], 0, || vec![], 1);
-    local.record_gauge("uptime", &[], 1, || vec![], 99.9);
+    local.record_count("request_count", &["http"], 0, Vec::new, 1);
+    local.record_gauge("uptime", &[], 1, Vec::new, 99.9);
 
     let flushed = local.flush();
     assert_eq!(flushed.len(), 2);

@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
+use crate::__private::MetricName;
 use crate::aggregator::striped_map::StripedAggMap;
-use crate::export::Exporter;
+use crate::export::{ConfiguredExporter, DistributionInput, Exporter};
 use crate::worker;
 
 static GLOBAL: OnceLock<MetricsClient> = OnceLock::new();
@@ -46,10 +47,12 @@ impl std::error::Error for AlreadyInitializedError {}
 pub struct MetricsClientBuilder {
     exporters: Vec<Box<dyn Exporter>>,
     flush_interval: Duration,
+    raw_sample_flush_interval: Duration,
     worker_threads: usize,
     max_buckets: u64,
     initial_error: f64,
     aggregate_distr_metrics: bool,
+    raw_sample_queue_capacity: usize,
 }
 
 impl MetricsClientBuilder {
@@ -57,10 +60,12 @@ impl MetricsClientBuilder {
         Self {
             exporters: Vec::new(),
             flush_interval: Duration::from_secs(10),
+            raw_sample_flush_interval: Duration::from_millis(100),
             worker_threads: 1,
             max_buckets: 200,
             initial_error: 0.001,
             aggregate_distr_metrics: true,
+            raw_sample_queue_capacity: RAW_POINT_CHANNEL_CAPACITY,
         }
     }
 
@@ -70,9 +75,26 @@ impl MetricsClientBuilder {
         self
     }
 
-    /// Set the flush interval (default: 10 seconds).
+    /// Set the counter, gauge, and sketch flush interval (default: 10 seconds).
+    /// Raw observations use `raw_sample_flush_interval` independently.
     pub fn flush_interval(mut self, interval: Duration) -> Self {
+        assert!(!interval.is_zero(), "flush interval must be positive");
         self.flush_interval = interval;
+        self
+    }
+
+    /// Set the raw-observation export interval (default: 100 milliseconds),
+    /// independently of the counter, gauge, and sketch flush interval.
+    /// Sequential or slow exporters can extend this latency.
+    ///
+    /// # Panics
+    /// Panics if the interval is zero.
+    pub fn raw_sample_flush_interval(mut self, interval: Duration) -> Self {
+        assert!(
+            !interval.is_zero(),
+            "raw sample flush interval must be positive"
+        );
+        self.raw_sample_flush_interval = interval;
         self
     }
 
@@ -94,11 +116,27 @@ impl MetricsClientBuilder {
         self
     }
 
-    /// Set whether histogram values are aggregated into a sketch before export
-    /// (default: `true`). Set to `false` to additionally emit each raw value
-    /// as an individual point, bypassing aggregation for StatsD distribution fidelity.
+    /// Legacy fallback for custom exporters without an explicit distribution input.
+    /// `false` also preserves Distribution output for StatsD with no explicit mode.
+    /// Explicit StatsD modes and other built-in requirements take precedence.
+    /// Migrate to an explicit exporter mode before removing this call.
+    #[deprecated(
+        note = "set an explicit StatsD histogram_mode before removing legacy false; custom exporters should implement distribution_input"
+    )]
     pub fn aggregate_distr_metrics(mut self, enabled: bool) -> Self {
         self.aggregate_distr_metrics = enabled;
+        self
+    }
+
+    /// Set the bounded raw-sample queue capacity (default: 16,384).
+    /// Recording never blocks: a full queue drops the newest raw observation,
+    /// counted by `MetricsClient::dropped_raw_samples`. Sketches remain complete.
+    ///
+    /// # Panics
+    /// Panics if capacity is zero.
+    pub fn raw_sample_queue_capacity(mut self, capacity: usize) -> Self {
+        assert!(capacity > 0, "raw sample queue capacity must be positive");
+        self.raw_sample_queue_capacity = capacity;
         self
     }
 
@@ -129,24 +167,43 @@ impl MetricsClientBuilder {
     }
 
     fn build_inner(self) -> MetricsClient {
-        let (raw_sender, raw_receiver) = if self.aggregate_distr_metrics {
-            (None, None)
+        let fallback = if self.aggregate_distr_metrics {
+            DistributionInput::Sketch
         } else {
-            let (tx, rx) = tokio::sync::mpsc::channel(RAW_POINT_CHANNEL_CAPACITY);
-            (Some(tx), Some(rx))
+            DistributionInput::Raw
         };
-
-        let aggregator = Arc::new(StripedAggMap::new(
-            self.max_buckets,
-            self.initial_error,
-            raw_sender,
-        ));
+        let exporters: Vec<_> = self
+            .exporters
+            .into_iter()
+            .map(|mut exporter| {
+                let input = exporter
+                    .configure_distribution(self.aggregate_distr_metrics)
+                    .unwrap_or(fallback);
+                ConfiguredExporter { exporter, input }
+            })
+            .collect();
+        // No-exporter clients retain the local flush/legacy recording behavior.
+        let wants_raw = exporters.iter().any(|e| e.input.wants_raw())
+            || (exporters.is_empty() && fallback.wants_raw());
+        let wants_sketch = exporters.iter().any(|e| e.input.wants_sketch())
+            || (exporters.is_empty() && fallback.wants_sketch());
+        let (raw_sender, raw_receiver) = if wants_raw {
+            let (tx, rx) = tokio::sync::mpsc::channel(self.raw_sample_queue_capacity);
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+        let aggregator = Arc::new(
+            StripedAggMap::new(self.max_buckets, self.initial_error, raw_sender)
+                .with_histogram_aggregation(wants_sketch),
+        );
         let shutdown_notify = Arc::new(Notify::new());
 
         let handle = worker::spawn_flush_worker(
             Arc::clone(&aggregator),
-            self.exporters,
+            exporters,
             self.flush_interval,
+            self.raw_sample_flush_interval,
             self.worker_threads,
             Arc::clone(&shutdown_notify),
             raw_receiver,
@@ -161,7 +218,16 @@ impl MetricsClientBuilder {
 }
 
 impl MetricsClient {
-    /// Shut down the flush worker, performing a final flush.
+    /// Number of raw observations rejected by a full or closed queue. This does
+    /// not count transport failures, which are logged by the worker.
+    /// Histogram sketches are unaffected by raw queue overflow.
+    pub fn dropped_raw_samples(&self) -> u64 {
+        self.aggregator.dropped_raw_samples()
+    }
+
+    /// Shut down the flush worker, draining accepted raw samples and performing
+    /// a final export before joining the worker. Stop all recording threads first.
+    /// This blocks on exporters and must not be called from an exporter callback.
     pub fn shutdown(&self) {
         self.shutdown_notify.notify_one();
         if let Ok(mut guard) = self.worker_handle.lock()
@@ -175,6 +241,12 @@ impl MetricsClient {
 /// Create a new builder for the metrics client.
 pub fn builder() -> MetricsClientBuilder {
     MetricsClientBuilder::new()
+}
+
+/// Number of raw observations rejected by the global client's full or closed
+/// queue. Returns zero before initialization. Transport failures are separate.
+pub fn dropped_raw_samples() -> u64 {
+    GLOBAL.get().map_or(0, MetricsClient::dropped_raw_samples)
 }
 
 /// Shut down the global metrics client. Safe to call multiple times.
@@ -203,10 +275,29 @@ pub fn record_count(
     make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
     delta: i64,
 ) {
+    record_count_named(
+        MetricName::new(metric_name),
+        namespace,
+        tags_hash,
+        make_tags,
+        delta,
+    );
+}
+
+/// Recording support for macro-generated metrics with compile-time name fingerprints.
+#[doc(hidden)]
+#[inline]
+pub fn record_count_named(
+    name: MetricName,
+    namespace: &'static [&'static str],
+    tags_hash: u64,
+    make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
+    delta: i64,
+) {
     if let Some(client) = GLOBAL.get() {
         client
             .aggregator
-            .record_count(metric_name, namespace, tags_hash, make_tags, delta);
+            .record_count_named(name, namespace, tags_hash, make_tags, delta);
     }
 }
 
@@ -219,10 +310,29 @@ pub fn record_gauge(
     make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
     value: f64,
 ) {
+    record_gauge_named(
+        MetricName::new(metric_name),
+        namespace,
+        tags_hash,
+        make_tags,
+        value,
+    );
+}
+
+/// Recording support for macro-generated metrics with compile-time name fingerprints.
+#[doc(hidden)]
+#[inline]
+pub fn record_gauge_named(
+    name: MetricName,
+    namespace: &'static [&'static str],
+    tags_hash: u64,
+    make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
+    value: f64,
+) {
     if let Some(client) = GLOBAL.get() {
         client
             .aggregator
-            .record_gauge(metric_name, namespace, tags_hash, make_tags, value);
+            .record_gauge_named(name, namespace, tags_hash, make_tags, value);
     }
 }
 
@@ -235,10 +345,29 @@ pub fn record_histogram(
     make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
     value: f64,
 ) {
+    record_histogram_named(
+        MetricName::new(metric_name),
+        namespace,
+        tags_hash,
+        make_tags,
+        value,
+    );
+}
+
+/// Recording support for macro-generated metrics with compile-time name fingerprints.
+#[doc(hidden)]
+#[inline]
+pub fn record_histogram_named(
+    name: MetricName,
+    namespace: &'static [&'static str],
+    tags_hash: u64,
+    make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
+    value: f64,
+) {
     if let Some(client) = GLOBAL.get() {
         client
             .aggregator
-            .record_histogram(metric_name, namespace, tags_hash, make_tags, value);
+            .record_histogram_named(name, namespace, tags_hash, make_tags, value);
     }
 }
 
@@ -281,13 +410,15 @@ impl MetricsClient {
             .record_histogram(metric_name, namespace, tags_hash, make_tags, value);
     }
 
-    /// Manually trigger a flush and return the flushed metrics.
+    /// Drain aggregates for inspection, consuming data otherwise exported by the
+    /// worker. This does not export metrics or drain the raw-sample queue.
     pub fn flush(&self) -> Vec<crate::export::FlushedMetric> {
         self.aggregator.flush()
     }
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::export::{ExportError, FlushedMetric};
@@ -319,8 +450,8 @@ mod tests {
             .build_local();
 
         client.record_count("test_count", &[], 100, || vec![("k", "v".into())], 5);
-        client.record_gauge("test_gauge", &[], 200, || vec![], 42.0);
-        client.record_histogram("test_hist", &[], 300, || vec![], 10.0);
+        client.record_gauge("test_gauge", &[], 200, Vec::new, 42.0);
+        client.record_histogram("test_hist", &[], 300, Vec::new, 10.0);
 
         let flushed = client.flush();
         assert_eq!(flushed.len(), 3);
@@ -339,7 +470,7 @@ mod tests {
             .flush_interval(Duration::from_millis(50))
             .build_local();
 
-        client.record_count("c", &[], 100, || vec![], 1);
+        client.record_count("c", &[], 100, Vec::new, 1);
 
         std::thread::sleep(Duration::from_millis(150));
         assert!(export_count.load(Ordering::Relaxed) > 0);
@@ -378,7 +509,7 @@ mod tests {
             .aggregate_distr_metrics(false)
             .build_local();
 
-        client.record_histogram("h", &[], 100, || vec![], 1.0);
+        client.record_histogram("h", &[], 100, Vec::new, 1.0);
 
         std::thread::sleep(Duration::from_millis(150));
         assert!(raw_count.load(Ordering::Relaxed) > 0);
@@ -397,7 +528,7 @@ mod tests {
             .flush_interval(Duration::from_millis(50))
             .build_local();
 
-        client.record_histogram("h", &[], 100, || vec![], 1.0);
+        client.record_histogram("h", &[], 100, Vec::new, 1.0);
 
         std::thread::sleep(Duration::from_millis(150));
         assert_eq!(raw_count.load(Ordering::Relaxed), 0);
@@ -406,9 +537,10 @@ mod tests {
 
     #[test]
     fn test_noop_when_not_initialized() {
-        record_count("noop", &[], 0, || vec![], 1);
-        record_gauge("noop", &[], 0, || vec![], 1.0);
-        record_histogram("noop", &[], 0, || vec![], 1.0);
+        record_count("noop", &[], 0, Vec::new, 1);
+        record_gauge("noop", &[], 0, Vec::new, 1.0);
+        record_histogram("noop", &[], 0, Vec::new, 1.0);
+        assert_eq!(dropped_raw_samples(), 0);
     }
 
     #[test]

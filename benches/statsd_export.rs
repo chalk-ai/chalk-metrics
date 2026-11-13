@@ -1,11 +1,16 @@
 use std::borrow::Cow;
 use std::net::UdpSocket;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use chalk_metrics::export::statsd::{HistogramExportMode, StatsdExporter};
-use chalk_metrics::export::{Exporter, FlushedMetric, FlushedValue, TagsData, UDDSketch};
+use chalk_metrics::export::{
+    Exporter, FlushedMetric, FlushedValue, RawDistributionPoint, TagsData, UDDSketch,
+};
 
 fn make_count_metric(i: usize) -> FlushedMetric {
     FlushedMetric {
@@ -63,24 +68,48 @@ fn make_mixed_batch(size: usize) -> Vec<FlushedMetric> {
     metrics
 }
 
-/// Bind a UDP socket to receive datagrams and drain them in a background thread.
-fn setup_drain_socket() -> (u16, std::thread::JoinHandle<()>) {
-    let recv = UdpSocket::bind("127.0.0.1:0").unwrap();
-    let port = recv.local_addr().unwrap().port();
-    recv.set_read_timeout(Some(std::time::Duration::from_millis(100)))
-        .unwrap();
+/// Keep the receiver alive across Criterion warmup and measurement gaps.
+struct DrainSocket {
+    port: u16,
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
 
-    let handle = std::thread::spawn(move || {
-        let mut buf = [0u8; 65536];
-        loop {
-            match recv.recv(&mut buf) {
-                Ok(_) => {}
-                Err(_) => break, // timeout or closed
+impl DrainSocket {
+    fn new() -> Self {
+        let recv = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = recv.local_addr().unwrap().port();
+        recv.set_read_timeout(Some(std::time::Duration::from_millis(20)))
+            .unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            let mut buf = [0u8; 65536];
+            while !worker_stop.load(Ordering::Relaxed) {
+                match recv.recv(&mut buf) {
+                    Ok(_) => {}
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) => {}
+                    Err(e) => panic!("UDP benchmark receiver failed: {e}"),
+                }
             }
+        });
+        Self {
+            port,
+            stop,
+            handle: Some(handle),
         }
-    });
+    }
+}
 
-    (port, handle)
+impl Drop for DrainSocket {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.handle.take().unwrap().join().unwrap();
+    }
 }
 
 fn statsd_benchmarks(c: &mut Criterion) {
@@ -99,7 +128,8 @@ fn statsd_benchmarks(c: &mut Criterion) {
             BenchmarkId::new("percentiles", batch_size),
             &batch_size,
             |b, &size| {
-                let (port, _drain) = setup_drain_socket();
+                let drain = DrainSocket::new();
+                let port = drain.port;
                 let exporter = StatsdExporter::udp(format!("127.0.0.1:{port}"))
                     .namespace("myapp")
                     .histogram_mode(HistogramExportMode::Percentiles(vec![0.5, 0.9, 0.95, 0.99]))
@@ -113,22 +143,28 @@ fn statsd_benchmarks(c: &mut Criterion) {
             },
         );
 
-        // Distribution mode
+        // Each element is one real observation, including on the baseline.
         group.bench_with_input(
-            BenchmarkId::new("distribution", batch_size),
+            BenchmarkId::new("raw_distribution", batch_size),
             &batch_size,
             |b, &size| {
-                let (port, _drain) = setup_drain_socket();
-                let exporter = StatsdExporter::udp(format!("127.0.0.1:{port}"))
+                let drain = DrainSocket::new();
+                let exporter = StatsdExporter::udp(format!("127.0.0.1:{}", drain.port))
                     .namespace("myapp")
                     .histogram_mode(HistogramExportMode::Distribution)
                     .build()
                     .unwrap();
-                let metrics = make_mixed_batch(size);
-
-                b.iter(|| {
-                    rt.block_on(exporter.export(&metrics)).unwrap();
-                });
+                let points: Vec<_> = (0..size)
+                    .map(|i| RawDistributionPoint {
+                        namespace: &["http"],
+                        metric_name: "request_latency",
+                        tags: Arc::new(TagsData {
+                            pairs: vec![("status", Cow::Borrowed("success"))],
+                        }),
+                        value: i as f64,
+                    })
+                    .collect();
+                b.iter(|| rt.block_on(exporter.export_raw_points(&points)).unwrap());
             },
         );
     }
@@ -136,5 +172,43 @@ fn statsd_benchmarks(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, statsd_benchmarks);
+fn distribution_volume_benchmarks(c: &mut Criterion) {
+    let mut group = c.benchmark_group("distribution_volume");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    for (series, tag_bytes) in [(1, 8), (64, 96), (10_000, 8)] {
+        let tags: Vec<_> = (0..series)
+            .map(|i| {
+                Arc::new(TagsData {
+                    pairs: vec![
+                        ("series", i.to_string().into()),
+                        ("endpoint", "x".repeat(tag_bytes).into()),
+                    ],
+                })
+            })
+            .collect();
+        let points: Vec<_> = (0..10_000)
+            .map(|i| RawDistributionPoint {
+                namespace: &["http"],
+                metric_name: "request_latency",
+                tags: Arc::clone(&tags[i % series]),
+                value: if i % 2 == 0 { 1.0 } else { 99.0 },
+            })
+            .collect();
+        let drain = DrainSocket::new();
+        let exporter = StatsdExporter::udp(format!("127.0.0.1:{}", drain.port))
+            .namespace("myapp")
+            .histogram_mode(HistogramExportMode::Distribution)
+            .build()
+            .unwrap();
+        group.throughput(Throughput::Elements(points.len() as u64));
+        group.bench_function(format!("{series}_series_{tag_bytes}_tag_bytes"), |b| {
+            b.iter(|| rt.block_on(exporter.export_raw_points(&points)).unwrap());
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, statsd_benchmarks, distribution_volume_benchmarks);
 criterion_main!(benches);

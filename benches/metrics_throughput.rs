@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 use std::borrow::Cow;
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
@@ -22,16 +23,13 @@ fn make_local_client_with_passthrough() -> client::MetricsClient {
         .build_local()
 }
 
+type MakeTags = Box<dyn Fn() -> Vec<(&'static str, Cow<'static, str>)> + Send + Sync>;
+type TagsPool = Vec<(u64, MakeTags)>;
+
 /// 80 tag combinations: 16 shards x 5 endpoints
-fn mixed_tags_pool() -> Vec<(
-    u64,
-    Box<dyn Fn() -> Vec<(&'static str, Cow<'static, str>)> + Send + Sync>,
-)> {
+fn mixed_tags_pool() -> TagsPool {
     let endpoints = ["api/v1", "api/v2", "health", "metrics", "graphql"];
-    let mut pool: Vec<(
-        u64,
-        Box<dyn Fn() -> Vec<(&'static str, Cow<'static, str>)> + Send + Sync>,
-    )> = Vec::new();
+    let mut pool: TagsPool = Vec::new();
 
     for shard in 0..16u64 {
         for &ep in &endpoints {
@@ -206,26 +204,29 @@ fn single_thread_benchmarks(c: &mut Criterion) {
         local.shutdown();
     });
 
-    group.bench_function("histogram/aggregate_distr_metrics_false", |b| {
-        let local = make_local_client_with_passthrough();
-        b.iter(|| {
-            for i in 0..OPS_PER_ITER {
-                local.record_histogram(
-                    "request_latency",
-                    &["http"],
-                    42,
-                    || {
-                        vec![
-                            ("endpoint", Cow::Borrowed("api/v1")),
-                            ("status", Cow::Borrowed("success")),
-                        ]
-                    },
-                    i as f64 * 0.001,
-                );
+    group.bench_function("histogram/raw_accepted", |b| {
+        // Fresh queue per timed batch: all 1,000 points fit, instead of timing
+        // try_send failures after filling an undrained queue during warmup.
+        b.iter_custom(|iters| {
+            let mut elapsed = Duration::ZERO;
+            for _ in 0..iters {
+                let local = make_local_client_with_passthrough();
+                let start = Instant::now();
+                for i in 0..OPS_PER_ITER {
+                    local.record_histogram(
+                        "request_latency",
+                        &["http"],
+                        42,
+                        || vec![("status", Cow::Borrowed("success"))],
+                        i as f64,
+                    );
+                }
+                elapsed += start.elapsed();
+                assert_eq!(local.dropped_raw_samples(), 0);
+                local.shutdown();
             }
+            elapsed
         });
-        local.flush();
-        local.shutdown();
     });
 
     group.finish();
@@ -300,5 +301,51 @@ fn contention_benchmarks(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, single_thread_benchmarks, contention_benchmarks);
+fn growth_benchmarks(c: &mut Criterion) {
+    let mut group = c.benchmark_group("growth");
+    group.throughput(Throughput::Elements(1024));
+    for kind in ["count", "gauge", "histogram"] {
+        group.bench_function(kind, |b| {
+            b.iter_custom(|iters| {
+                let mut elapsed = Duration::ZERO;
+                for _ in 0..iters {
+                    let local = make_local_client();
+                    let start = Instant::now();
+                    for value in [1.0, 99.0] {
+                        for series in 0..512 {
+                            let tags = || vec![("series", Cow::Owned(series.to_string()))];
+                            match kind {
+                                "count" => local.record_count(
+                                    "growth",
+                                    &[],
+                                    series * 64,
+                                    tags,
+                                    value as i64,
+                                ),
+                                "gauge" => {
+                                    local.record_gauge("growth", &[], series * 64, tags, value)
+                                }
+                                _ => {
+                                    local.record_histogram("growth", &[], series * 64, tags, value)
+                                }
+                            }
+                        }
+                    }
+                    elapsed += start.elapsed();
+                    std::hint::black_box(local.flush());
+                    local.shutdown();
+                }
+                elapsed
+            });
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    single_thread_benchmarks,
+    contention_benchmarks,
+    growth_benchmarks
+);
 criterion_main!(benches);

@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use hashbrown::HashMap;
 use parking_lot::Mutex;
@@ -6,6 +9,7 @@ use parking_lot::Mutex;
 use super::count::CountSlot;
 use super::gauge::GaugeSlot;
 use super::histogram::HistogramSlot;
+use crate::__private::MetricName;
 use crate::export::{FlushedMetric, FlushedValue, RawDistributionPoint};
 
 const STRIPE_COUNT: usize = 64;
@@ -31,14 +35,43 @@ enum AggSlot {
     Count(CountSlot),
     Gauge(GaugeSlot),
     Histogram(HistogramSlot),
+    RawDistribution,
 }
 
-type Stripe = Mutex<HashMap<u64, (AggKey, AggSlot)>>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum MetricKind {
+    Count,
+    Gauge,
+    Histogram,
+}
+
+// Hashes choose buckets; equality includes the metric's namespace and kind.
+// tags_hash is the fingerprint supplied by the generated recording API.
+#[derive(Debug, PartialEq, Eq)]
+struct SeriesKey {
+    fingerprint: u64,
+    namespace: &'static [&'static str],
+    metric_name: &'static str,
+    tags_hash: u64,
+    kind: MetricKind,
+}
+
+impl std::hash::Hash for SeriesKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // HashMap still owns hashing, including rehashing during growth. Reuse
+        // the placement fingerprint, but compare full identity on collisions.
+        state.write_u64(self.fingerprint);
+    }
+}
+
+type Stripe = Mutex<HashMap<SeriesKey, (AggKey, AggSlot)>>;
 
 pub struct StripedAggMap {
     stripes: Box<[Stripe]>,
     max_buckets: u64,
     initial_error: f64,
+    aggregate_histograms: bool,
+    dropped_raw_samples: AtomicU64,
     raw_sender: Option<tokio::sync::mpsc::Sender<RawDistributionPoint>>,
 }
 
@@ -55,8 +88,15 @@ impl StripedAggMap {
             stripes: stripes.into_boxed_slice(),
             max_buckets,
             initial_error,
+            aggregate_histograms: raw_sender.is_none(),
+            dropped_raw_samples: AtomicU64::new(0),
             raw_sender,
         }
+    }
+
+    pub(crate) fn with_histogram_aggregation(mut self, enabled: bool) -> Self {
+        self.aggregate_histograms = enabled;
+        self
     }
 
     #[inline]
@@ -68,21 +108,44 @@ impl StripedAggMap {
         make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
         delta: i64,
     ) {
-        let combined = combine_hash(metric_name, tags_hash);
+        self.record_count_named(
+            MetricName::new(metric_name),
+            namespace,
+            tags_hash,
+            make_tags,
+            delta,
+        );
+    }
+
+    #[inline]
+    pub(crate) fn record_count_named(
+        &self,
+        name: MetricName,
+        namespace: &'static [&'static str],
+        tags_hash: u64,
+        make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
+        delta: i64,
+    ) {
+        let combined = combine_hash(name.hash(), tags_hash);
+        let metric_name = name.as_str();
         let stripe_idx = combined as usize & STRIPE_MASK;
         let mut guard = self.stripes[stripe_idx].lock();
 
-        let entry = guard
-            .raw_entry_mut()
-            .from_hash(combined, |k| *k == combined);
+        let entry = guard.entry(SeriesKey {
+            fingerprint: combined,
+            namespace,
+            metric_name,
+            tags_hash,
+            kind: MetricKind::Count,
+        });
 
         match entry {
-            hashbrown::hash_map::RawEntryMut::Occupied(e) => {
+            hashbrown::hash_map::Entry::Occupied(e) => {
                 if let AggSlot::Count(ref slot) = e.get().1 {
                     slot.record(delta);
                 }
             }
-            hashbrown::hash_map::RawEntryMut::Vacant(e) => {
+            hashbrown::hash_map::Entry::Vacant(e) => {
                 let slot = CountSlot::new();
                 slot.record(delta);
                 let key = AggKey {
@@ -90,7 +153,7 @@ impl StripedAggMap {
                     metric_name,
                     tags_data: Arc::new(TagsData { pairs: make_tags() }),
                 };
-                e.insert_hashed_nocheck(combined, combined, (key, AggSlot::Count(slot)));
+                e.insert((key, AggSlot::Count(slot)));
             }
         }
     }
@@ -104,21 +167,44 @@ impl StripedAggMap {
         make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
         value: f64,
     ) {
-        let combined = combine_hash(metric_name, tags_hash);
+        self.record_gauge_named(
+            MetricName::new(metric_name),
+            namespace,
+            tags_hash,
+            make_tags,
+            value,
+        );
+    }
+
+    #[inline]
+    pub(crate) fn record_gauge_named(
+        &self,
+        name: MetricName,
+        namespace: &'static [&'static str],
+        tags_hash: u64,
+        make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
+        value: f64,
+    ) {
+        let combined = combine_hash(name.hash(), tags_hash);
+        let metric_name = name.as_str();
         let stripe_idx = combined as usize & STRIPE_MASK;
         let mut guard = self.stripes[stripe_idx].lock();
 
-        let entry = guard
-            .raw_entry_mut()
-            .from_hash(combined, |k| *k == combined);
+        let entry = guard.entry(SeriesKey {
+            fingerprint: combined,
+            namespace,
+            metric_name,
+            tags_hash,
+            kind: MetricKind::Gauge,
+        });
 
         match entry {
-            hashbrown::hash_map::RawEntryMut::Occupied(e) => {
+            hashbrown::hash_map::Entry::Occupied(e) => {
                 if let AggSlot::Gauge(ref slot) = e.get().1 {
                     slot.record(value);
                 }
             }
-            hashbrown::hash_map::RawEntryMut::Vacant(e) => {
+            hashbrown::hash_map::Entry::Vacant(e) => {
                 let slot = GaugeSlot::new();
                 slot.record(value);
                 let key = AggKey {
@@ -126,7 +212,7 @@ impl StripedAggMap {
                     metric_name,
                     tags_data: Arc::new(TagsData { pairs: make_tags() }),
                 };
-                e.insert_hashed_nocheck(combined, combined, (key, AggSlot::Gauge(slot)));
+                e.insert((key, AggSlot::Gauge(slot)));
             }
         }
     }
@@ -140,48 +226,72 @@ impl StripedAggMap {
         make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
         value: f64,
     ) {
-        match &self.raw_sender {
-            Some(sender) => {
-                let tags = Arc::new(TagsData { pairs: make_tags() });
-                let _ = sender.try_send(RawDistributionPoint {
+        self.record_histogram_named(
+            MetricName::new(metric_name),
+            namespace,
+            tags_hash,
+            make_tags,
+            value,
+        );
+    }
+
+    #[inline]
+    pub(crate) fn record_histogram_named(
+        &self,
+        name: MetricName,
+        namespace: &'static [&'static str],
+        tags_hash: u64,
+        make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
+        value: f64,
+    ) {
+        let combined = combine_hash(name.hash(), tags_hash);
+        let metric_name = name.as_str();
+        let stripe_idx = combined as usize & STRIPE_MASK;
+        let mut guard = self.stripes[stripe_idx].lock();
+        let (key, slot) = guard
+            .entry(SeriesKey {
+                fingerprint: combined,
+                namespace,
+                metric_name,
+                tags_hash,
+                kind: MetricKind::Histogram,
+            })
+            .or_insert_with(|| {
+                let slot = if self.aggregate_histograms {
+                    AggSlot::Histogram(HistogramSlot::new(self.max_buckets, self.initial_error))
+                } else {
+                    AggSlot::RawDistribution
+                };
+                (
+                    AggKey {
+                        namespace,
+                        metric_name,
+                        tags_data: Arc::new(TagsData { pairs: make_tags() }),
+                    },
+                    slot,
+                )
+            });
+        if let AggSlot::Histogram(slot) = slot {
+            slot.record(value);
+        }
+        let tags = self.raw_sender.as_ref().map(|_| Arc::clone(&key.tags_data));
+        drop(guard);
+        if let (Some(sender), Some(tags)) = (&self.raw_sender, tags)
+            && sender
+                .try_send(RawDistributionPoint {
                     namespace,
                     metric_name,
                     tags,
                     value,
-                });
-            }
-            None => {
-                let combined = combine_hash(metric_name, tags_hash);
-                let stripe_idx = combined as usize & STRIPE_MASK;
-                let mut guard = self.stripes[stripe_idx].lock();
-
-                let entry = guard
-                    .raw_entry_mut()
-                    .from_hash(combined, |k| *k == combined);
-
-                match entry {
-                    hashbrown::hash_map::RawEntryMut::Occupied(e) => {
-                        if let AggSlot::Histogram(ref slot) = e.get().1 {
-                            slot.record(value);
-                        }
-                    }
-                    hashbrown::hash_map::RawEntryMut::Vacant(e) => {
-                        let slot = HistogramSlot::new(self.max_buckets, self.initial_error);
-                        slot.record(value);
-                        let key = AggKey {
-                            namespace,
-                            metric_name,
-                            tags_data: Arc::new(TagsData { pairs: make_tags() }),
-                        };
-                        e.insert_hashed_nocheck(
-                            combined,
-                            combined,
-                            (key, AggSlot::Histogram(slot)),
-                        );
-                    }
-                }
-            }
+                })
+                .is_err()
+        {
+            self.dropped_raw_samples.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    pub(crate) fn dropped_raw_samples(&self) -> u64 {
+        self.dropped_raw_samples.load(Ordering::Relaxed)
     }
 
     pub fn flush(&self) -> Vec<FlushedMetric> {
@@ -190,6 +300,7 @@ impl StripedAggMap {
         for stripe in self.stripes.iter() {
             let mut guard = stripe.lock();
             guard.retain(|_combined, (key, slot)| match slot {
+                AggSlot::RawDistribution => false,
                 AggSlot::Count(count_slot) => {
                     let value = count_slot.flush();
                     flushed.push(FlushedMetric {
@@ -230,12 +341,10 @@ impl StripedAggMap {
     }
 }
 
-/// Use the static string pointer as part of the hash key. Since metric names
-/// are `&'static str` from macro-generated code, identical strings share the
-/// same address, making this an O(1) identity check.
+/// Placement hint only: full series identity is compared by HashMap::entry.
+/// Equal metric names must select the same stripe even at different addresses.
 #[inline]
-fn combine_hash(metric_name: &'static str, tags_hash: u64) -> u64 {
-    let name_hash = metric_name.as_ptr() as u64;
+fn combine_hash(name_hash: u64, tags_hash: u64) -> u64 {
     tags_hash
         .wrapping_mul(6364136223846793005)
         .wrapping_add(name_hash)
@@ -247,6 +356,144 @@ mod tests {
 
     fn make_map() -> StripedAggMap {
         StripedAggMap::new(200, 0.001, None)
+    }
+
+    fn record_growth(map: &StripedAggMap, kind: u8, series: u64, value: f64) {
+        let tags = || vec![("series", series.to_string().into())];
+        // Multiples of 64 force every key into one stripe in the original map.
+        match kind {
+            0 => map.record_count("growth", &[], series * 64, tags, value as i64),
+            1 => map.record_gauge("growth", &[], series * 64, tags, value),
+            _ => map.record_histogram("growth", &[], series * 64, tags, value),
+        }
+    }
+
+    fn check_growth(kind: u8) {
+        let map = make_map();
+        for series in 0..512 {
+            record_growth(&map, kind, series, 1.0);
+        }
+        // Assert that the workload really exercised stripe growth.
+        assert!(map.stripes.iter().any(|stripe| stripe.lock().len() == 512));
+        for series in 0..512 {
+            record_growth(&map, kind, series, 99.0);
+        }
+        let flushed = map.flush();
+        assert_eq!(flushed.len(), 512, "one entry per series after growth");
+        let mut seen = std::collections::HashSet::new();
+        for metric in flushed {
+            assert!(seen.insert(metric.tags.pairs[0].1.clone()));
+            match metric.value {
+                FlushedValue::Count(value) => assert_eq!(value, 100),
+                FlushedValue::Gauge(value) => assert_eq!(value, 99.0),
+                FlushedValue::Histogram(sketch) => {
+                    assert_eq!(sketch.count(), 2);
+                    assert_eq!(sketch.sum(), 100.0);
+                    assert_eq!(sketch.min(), 1.0);
+                    assert_eq!(sketch.max(), 99.0);
+                }
+            }
+        }
+        assert_eq!(map.flush().len(), if kind == 1 { 512 } else { 0 });
+        for series in 0..512 {
+            record_growth(&map, kind, series, 7.0);
+        }
+        assert_eq!(map.flush().len(), 512);
+    }
+
+    #[test]
+    fn growth_preserves_counter_totals_and_unique_series() {
+        check_growth(0);
+    }
+
+    #[test]
+    fn growth_preserves_gauge_updates() {
+        check_growth(1);
+    }
+
+    #[test]
+    fn growth_preserves_histogram_samples() {
+        check_growth(2);
+    }
+
+    #[test]
+    fn same_name_in_different_namespaces_is_distinct() {
+        let map = make_map();
+        map.record_count("requests", &["http"], 42, Vec::new, 1);
+        map.record_count("requests", &["rpc"], 42, Vec::new, 99);
+        assert_eq!(map.flush().len(), 2);
+    }
+
+    #[test]
+    fn metric_names_compare_by_content() {
+        let map = make_map();
+        let first = Box::leak(String::from("same_name").into_boxed_str());
+        let second = Box::leak(String::from("same_name").into_boxed_str());
+        assert_ne!(first.as_ptr(), second.as_ptr());
+        map.record_count(first, &[], 42, Vec::new, 1);
+        map.record_count(second, &[], 42, || panic!("tags already cached"), 99);
+        let flushed = map.flush();
+        assert_eq!(flushed.len(), 1);
+        assert!(matches!(flushed[0].value, FlushedValue::Count(100)));
+    }
+
+    #[test]
+    fn precomputed_and_runtime_names_coalesce_after_growth() {
+        const NAME: MetricName = MetricName::new("growth");
+        let map = make_map();
+        let other_name = Box::leak(String::from("growth").into_boxed_str());
+        assert_ne!(NAME.as_str().as_ptr(), other_name.as_ptr());
+        for series in 0..512 {
+            map.record_count_named(NAME, &[], series * 64, Vec::new, 1);
+            map.record_gauge_named(NAME, &[], series * 64, Vec::new, 1.0);
+            map.record_histogram_named(NAME, &[], series * 64, Vec::new, 1.0);
+        }
+        assert!(map.stripes.iter().any(|stripe| stripe.lock().len() == 1536));
+        for series in 0..512 {
+            let cached = || panic!("precomputed and runtime names must share cached tags");
+            map.record_count(other_name, &[], series * 64, cached, 99);
+            map.record_gauge(other_name, &[], series * 64, cached, 99.0);
+            map.record_histogram(other_name, &[], series * 64, cached, 99.0);
+        }
+        let flushed = map.flush();
+        assert_eq!(flushed.len(), 1536);
+        for metric in flushed {
+            match metric.value {
+                FlushedValue::Count(value) => assert_eq!(value, 100),
+                FlushedValue::Gauge(value) => assert_eq!(value, 99.0),
+                FlushedValue::Histogram(sketch) => {
+                    assert_eq!(sketch.count(), 2);
+                    assert_eq!(sketch.sum(), 100.0);
+                    assert_eq!(sketch.min(), 1.0);
+                    assert_eq!(sketch.max(), 99.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn concurrent_growth_keeps_one_counter_per_series() {
+        let map = Arc::new(make_map());
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let map = Arc::clone(&map);
+                std::thread::spawn(move || {
+                    for _ in 0..4 {
+                        for series in 0..512 {
+                            record_growth(&map, 0, series, 1.0);
+                        }
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let flushed = map.flush();
+        assert_eq!(flushed.len(), 512);
+        for metric in flushed {
+            assert!(matches!(metric.value, FlushedValue::Count(32)));
+        }
     }
 
     #[test]
@@ -268,7 +515,7 @@ mod tests {
     #[test]
     fn test_insert_with_namespace() {
         let map = make_map();
-        map.record_count("request_count", &["http"], 100, || vec![], 1);
+        map.record_count("request_count", &["http"], 100, Vec::new, 1);
 
         let flushed = map.flush();
         assert_eq!(flushed[0].namespace, &["http"]);
@@ -278,7 +525,7 @@ mod tests {
     #[test]
     fn test_insert_and_record_gauge() {
         let map = make_map();
-        map.record_gauge("test_gauge", &[], 456, || vec![], 10.0);
+        map.record_gauge("test_gauge", &[], 456, Vec::new, 10.0);
         map.record_gauge("test_gauge", &[], 456, || panic!("should not call"), 20.0);
 
         let flushed = map.flush();
@@ -292,7 +539,7 @@ mod tests {
     #[test]
     fn test_insert_and_record_histogram() {
         let map = make_map();
-        map.record_histogram("test_hist", &[], 789, || vec![], 42.0);
+        map.record_histogram("test_hist", &[], 789, Vec::new, 42.0);
         map.record_histogram("test_hist", &[], 789, || panic!("should not call"), 43.0);
 
         let flushed = map.flush();
@@ -306,15 +553,15 @@ mod tests {
     #[test]
     fn test_different_metrics() {
         let map = make_map();
-        map.record_count("count_a", &[], 100, || vec![], 1);
-        map.record_count("count_b", &[], 100, || vec![], 2);
+        map.record_count("count_a", &[], 100, Vec::new, 1);
+        map.record_count("count_b", &[], 100, Vec::new, 2);
         assert_eq!(map.flush().len(), 2);
     }
 
     #[test]
     fn test_flush_removes_count_entries() {
         let map = make_map();
-        map.record_count("c", &[], 100, || vec![], 5);
+        map.record_count("c", &[], 100, Vec::new, 5);
         assert_eq!(map.flush().len(), 1);
         assert_eq!(map.flush().len(), 0);
     }
@@ -322,7 +569,7 @@ mod tests {
     #[test]
     fn test_flush_retains_gauge_entries() {
         let map = make_map();
-        map.record_gauge("g", &[], 100, || vec![], 42.0);
+        map.record_gauge("g", &[], 100, Vec::new, 42.0);
         assert_eq!(map.flush().len(), 1);
         assert_eq!(map.flush().len(), 1);
     }
@@ -332,10 +579,9 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let map = StripedAggMap::new(200, 0.001, Some(tx));
 
-        // Passthrough mode never touches the aggregation map, so make_tags is
-        // called fresh on every record (no cached Arc<TagsData> to reuse).
+        // Raw-only entries cache tags but do not allocate histogram sketches.
         map.record_histogram("test_hist", &[], 789, || vec![("k", "v".into())], 1.0);
-        map.record_histogram("test_hist", &[], 789, || vec![("k", "v".into())], 2.0);
+        map.record_histogram("test_hist", &[], 789, || panic!("tags cached"), 2.0);
 
         // The sketch is bypassed entirely in passthrough mode, so flush() has nothing to emit.
         let flushed = map.flush();
@@ -354,7 +600,7 @@ mod tests {
     #[test]
     fn test_histogram_without_raw_sender_sends_nothing() {
         let map = make_map();
-        map.record_histogram("test_hist", &[], 789, || vec![], 1.0);
+        map.record_histogram("test_hist", &[], 789, Vec::new, 1.0);
         assert!(map.raw_sender.is_none());
     }
 
