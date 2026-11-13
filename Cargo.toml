@@ -37,5 +37,9 @@ name = "statsd_export"
 harness = false
 
 [[bench]]
+name = "distribution_volume"
+harness = false
+
+[[bench]]
 name = "name_recording"
 harness = false

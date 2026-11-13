@@ -172,5 +172,43 @@ fn statsd_benchmarks(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, statsd_benchmarks);
+fn distribution_volume_benchmarks(c: &mut Criterion) {
+    let mut group = c.benchmark_group("distribution_volume");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    for (series, tag_bytes) in [(1, 8), (64, 96), (10_000, 8)] {
+        let tags: Vec<_> = (0..series)
+            .map(|i| {
+                Arc::new(TagsData {
+                    pairs: vec![
+                        ("series", i.to_string().into()),
+                        ("endpoint", "x".repeat(tag_bytes).into()),
+                    ],
+                })
+            })
+            .collect();
+        let points: Vec<_> = (0..10_000)
+            .map(|i| RawDistributionPoint {
+                namespace: &["http"],
+                metric_name: "request_latency",
+                tags: Arc::clone(&tags[i % series]),
+                value: if i % 2 == 0 { 1.0 } else { 99.0 },
+            })
+            .collect();
+        let drain = DrainSocket::new();
+        let exporter = StatsdExporter::udp(format!("127.0.0.1:{}", drain.port))
+            .namespace("myapp")
+            .histogram_mode(HistogramExportMode::Distribution)
+            .build()
+            .unwrap();
+        group.throughput(Throughput::Elements(points.len() as u64));
+        group.bench_function(format!("{series}_series_{tag_bytes}_tag_bytes"), |b| {
+            b.iter(|| rt.block_on(exporter.export_raw_points(&points)).unwrap());
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, statsd_benchmarks, distribution_volume_benchmarks);
 criterion_main!(benches);

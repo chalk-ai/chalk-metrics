@@ -112,12 +112,9 @@ fn periodic_flush_delivers_each_sample_once_with_either_runtime() {
         let mut buffer = [0; 4096];
         while received.len() < 2 {
             let n = socket.recv(&mut buffer).unwrap();
-            received.extend(
-                std::str::from_utf8(&buffer[..n])
-                    .unwrap()
-                    .lines()
-                    .map(str::to_owned),
-            );
+            received.extend(common::expand_lines(
+                std::str::from_utf8(&buffer[..n]).unwrap(),
+            ));
         }
         client.shutdown();
         socket
@@ -136,6 +133,7 @@ fn shutdown_flushes_every_accepted_sample_after_producers_join() {
         client::builder()
             .with_exporter(distribution(&socket))
             .raw_sample_queue_capacity(512)
+            .raw_sample_flush_interval(Duration::from_secs(3600))
             .flush_interval(Duration::from_secs(3600))
             .build_local(),
     );

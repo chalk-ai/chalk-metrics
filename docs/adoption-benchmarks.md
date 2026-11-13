@@ -5,6 +5,10 @@ Measured on Linux x86_64, AMD EPYC 9B45 (16 logical CPUs), rustc 1.99.0
 (`b940084d7`, 2026-09-28), release profile with the checked-in lockfile.
 This is a shared virtual machine; contention and UDP timings are especially noisy.
 
+The tables below retain the first published stack's measurements. Distribution
+packing and independent raw flushing were subsequently added; their current
+before/after results and limitations are in [distribution volume benchmarks](distribution-volume.md).
+
 The same benchmark harness is used on both implementations. Raw recording uses
 fresh queues with 1,000 observations per batch (below the 16,384 limit), excluding
 client startup and shutdown from timing. UDP receivers stay alive throughout
@@ -55,8 +59,10 @@ than hidden behind the incorrect baseline's throughput.
 ## Exporter-aware distribution routing
 
 The behavioral baseline records `1` and `99` but sends one `latency:50|d`
-observation. Correct routing sends `latency:1|d` and `latency:99|d`, once per
+observation. Correct routing preserves observations `1` and `99`, once per
 Distribution destination. Simultaneous sketches retain count 2 and sum 100.
+The revised exporter can encode these as one `latency:1:99|d` message; it is
+still two observations, not an average or a single observation.
 Both legacy toggle settings are tested; neither can disable built-in requirements.
 Directly exporting a sketch as Distribution now returns an error.
 

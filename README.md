@@ -322,6 +322,9 @@ but payload size and agent processing still grow with sample rate. It does not
 increase the number of distinct series when names and tags are unchanged.
 StatsD `Percentiles` remains the default and uses local sketches; its per-process
 percentiles cannot be merged into a global percentile. Sampling is not implicit.
+Packing can add CPU without reducing bytes when each series has only one sample
+per batch. It can also be disabled for these workloads. See the measured traffic,
+latency, queue loss, and CPU tradeoffs in [distribution volume benchmarks](docs/distribution-volume.md).
 
 ### Migrating the global distribution toggle
 
@@ -450,6 +453,11 @@ Before/after results, reproduction commands, workload definitions, and the
 measurement environment are recorded in [adoption benchmarks](docs/adoption-benchmarks.md).
 [Machine-readable estimates](docs/benchmark-results.json) include the upstream
 baseline and each implementation stage.
+
+The [distribution volume results](docs/distribution-volume.md) also compare the
+original upstream, the first published stack, and the revised stack with the
+same harness. They include payload bytes, datagrams, twelve-second paced loads,
+queue drops, latency, and process CPU; all received values are decoded.
 
 The report covers existing-series updates, forced map growth, contention,
 accepted raw-sample recording, real UDP export, and Prometheus rendering.
