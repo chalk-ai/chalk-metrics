@@ -386,10 +386,44 @@ chalk_metrics::client::builder()
     .worker_threads(1)               // tokio runtime threads (default: 1)
     .max_buckets(200)                // histogram max buckets
     .initial_error(0.001)            // histogram error bound
+    .raw_sample_queue_capacity(16_384) // queued original observations
     .init();                         // or .try_init() for Result
 ```
 
-Shutdown happens automatically via `atexit`, or explicitly via `chalk_metrics::client::shutdown()`.
+### Flush latency, overflow, and shutdown
+
+Both sketches and original observations are exported on the flush interval
+(default 10 seconds). The worker skips its immediate startup tick. Allow up to
+one interval plus scheduling and exporter execution time; slow exporters can
+extend this latency because exporter calls are sequential, even with multiple
+runtime threads. Increasing `worker_threads` does not parallelize exporter calls.
+
+The shared raw-sample queue defaults to 16,384 observations and can be sized with
+`raw_sample_queue_capacity(n)` (`n > 0`). Size it for peak sample rate times the
+flush interval plus slow-exporter headroom. Recording never waits for space:
+overflow drops the newest raw sample. `client.dropped_raw_samples()` counts full
+or closed queue rejections. Sketch consumers still include these observations.
+This counter does not include network failures.
+
+UDP accepts IPv4, bracketed IPv6, and hostnames with ports. Datagram limits are
+1432 bytes for UDP and 8192 for UDS by default, configurable with
+`max_buffer_size(n)` (`n > 0`). Limits include UTF-8 bytes and newline separators.
+A line larger than the limit is rejected without splitting it; valid sibling
+lines are sent and the batch returns an error. Send failures are returned to
+direct callers and logged by the worker. There are no delivery acknowledgments
+or retries, and successful UDP sends do not guarantee receiver delivery. UDS
+connections reconnect after failures or socket replacement on later exports.
+
+Stop and join metric-producing threads, then call the local client's
+`shutdown()` or global `chalk_metrics::client::shutdown()`. Shutdown closes the
+raw queue, exports pending aggregates and accepted raw samples, and joins the
+worker; it is idempotent and blocks on exporter completion. Do not call it from
+an exporter callback. Local clients require explicit shutdown. The global client
+also registers an `atexit` handler, but abrupt termination, signals, and process
+aborts can bypass it. Recording after shutdown is unsupported.
+
+Tenant identity, required service tags, and service-specific tag validation
+remain the consumer's responsibility; the shared client does not infer them.
 
 ## Benchmarks
 

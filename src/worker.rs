@@ -39,6 +39,7 @@ pub(crate) fn spawn_flush_worker(
                 let exporters = Arc::new(exporters);
                 let mut raw_receiver = raw_receiver;
                 let mut interval = time::interval(flush_interval);
+                interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
                 interval.tick().await; // first tick is immediate, skip it
 
                 loop {
@@ -48,7 +49,8 @@ pub(crate) fn spawn_flush_worker(
                             drain_raw_and_export(&mut raw_receiver, &exporters).await;
                         }
                         _ = shutdown.notified() => {
-                            // Final flush before shutdown
+                            // Prevent new raw admissions, then drain everything accepted.
+                            if let Some(receiver) = &mut raw_receiver { receiver.close(); }
                             flush_and_export(&aggregator, &exporters).await;
                             drain_raw_and_export(&mut raw_receiver, &exporters).await;
                             break;
@@ -105,9 +107,15 @@ async fn drain_raw_and_export(
         return;
     };
 
-    let mut points = Vec::new();
-    while let Ok(point) = receiver.try_recv() {
-        points.push(point);
+    // Snapshot the batch size: continuous producers cannot make this drain
+    // unbounded or starve shutdown. A closed queue's snapshot is the final batch.
+    let batch_size = receiver.len();
+    let mut points = Vec::with_capacity(batch_size);
+    for _ in 0..batch_size {
+        match receiver.try_recv() {
+            Ok(point) => points.push(point),
+            Err(_) => break,
+        }
     }
     if points.is_empty() {
         return;

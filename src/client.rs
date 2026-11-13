@@ -51,6 +51,7 @@ pub struct MetricsClientBuilder {
     max_buckets: u64,
     initial_error: f64,
     aggregate_distr_metrics: bool,
+    raw_sample_queue_capacity: usize,
 }
 
 impl MetricsClientBuilder {
@@ -62,6 +63,7 @@ impl MetricsClientBuilder {
             max_buckets: 200,
             initial_error: 0.001,
             aggregate_distr_metrics: true,
+            raw_sample_queue_capacity: RAW_POINT_CHANNEL_CAPACITY,
         }
     }
 
@@ -73,6 +75,7 @@ impl MetricsClientBuilder {
 
     /// Set the flush interval (default: 10 seconds).
     pub fn flush_interval(mut self, interval: Duration) -> Self {
+        assert!(!interval.is_zero(), "flush interval must be positive");
         self.flush_interval = interval;
         self
     }
@@ -104,6 +107,18 @@ impl MetricsClientBuilder {
     )]
     pub fn aggregate_distr_metrics(mut self, enabled: bool) -> Self {
         self.aggregate_distr_metrics = enabled;
+        self
+    }
+
+    /// Set the bounded raw-sample queue capacity (default: 16,384).
+    /// Recording never blocks: a full queue drops the newest raw observation,
+    /// counted by `MetricsClient::dropped_raw_samples`. Sketches remain complete.
+    ///
+    /// # Panics
+    /// Panics if capacity is zero.
+    pub fn raw_sample_queue_capacity(mut self, capacity: usize) -> Self {
+        assert!(capacity > 0, "raw sample queue capacity must be positive");
+        self.raw_sample_queue_capacity = capacity;
         self
     }
 
@@ -155,7 +170,7 @@ impl MetricsClientBuilder {
         let wants_sketch = exporters.iter().any(|e| e.input.wants_sketch())
             || (exporters.is_empty() && fallback.wants_sketch());
         let (raw_sender, raw_receiver) = if wants_raw {
-            let (tx, rx) = tokio::sync::mpsc::channel(RAW_POINT_CHANNEL_CAPACITY);
+            let (tx, rx) = tokio::sync::mpsc::channel(self.raw_sample_queue_capacity);
             (Some(tx), Some(rx))
         } else {
             (None, None)
@@ -184,7 +199,16 @@ impl MetricsClientBuilder {
 }
 
 impl MetricsClient {
-    /// Shut down the flush worker, performing a final flush.
+    /// Number of raw observations rejected by a full or closed queue. This does
+    /// not count transport failures, which are logged by the worker.
+    /// Histogram sketches are unaffected by raw queue overflow.
+    pub fn dropped_raw_samples(&self) -> u64 {
+        self.aggregator.dropped_raw_samples()
+    }
+
+    /// Shut down the flush worker, draining accepted raw samples and performing
+    /// a final export before joining the worker. Stop all recording threads first.
+    /// This blocks on exporters and must not be called from an exporter callback.
     pub fn shutdown(&self) {
         self.shutdown_notify.notify_one();
         if let Ok(mut guard) = self.worker_handle.lock()

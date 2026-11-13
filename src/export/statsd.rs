@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::io;
-use std::net::UdpSocket;
+use std::net::{ToSocketAddrs, UdpSocket};
 #[cfg(unix)]
 use std::os::unix::net::UnixDatagram;
 use std::path::{Path, PathBuf};
@@ -100,7 +100,9 @@ impl StatsdExporterBuilder {
         self
     }
 
-    /// Set the maximum datagram buffer size in bytes (default: 1432).
+    /// Set the positive maximum datagram size in bytes (UDP default: 1432;
+    /// UDS default: 8192), including newline separators. Oversized individual
+    /// lines are rejected and reported while valid sibling lines are sent.
     pub fn max_buffer_size(mut self, size: usize) -> Self {
         self.max_buffer_size = size;
         self
@@ -108,13 +110,14 @@ impl StatsdExporterBuilder {
 
     /// Build the exporter, creating the underlying socket.
     pub fn build(self) -> io::Result<StatsdExporter> {
+        if self.max_buffer_size == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "max_buffer_size must be positive",
+            ));
+        }
         let socket = match self.target {
-            StatsdTarget::Udp(addr) => {
-                let sock = UdpSocket::bind("0.0.0.0:0")?;
-                sock.connect(&addr)?;
-                sock.set_nonblocking(true)?;
-                Socket::Udp(sock)
-            }
+            StatsdTarget::Udp(addr) => Socket::Udp(connect_udp(&addr)?),
             #[cfg(unix)]
             StatsdTarget::Uds(path) => {
                 let inode = get_inode(&path).unwrap_or(0);
@@ -141,7 +144,8 @@ impl StatsdExporterBuilder {
 }
 
 impl StatsdExporter {
-    /// Create a builder targeting a UDP address (e.g., `"127.0.0.1:8125"`).
+    /// Create a builder targeting an IPv4/IPv6 address or hostname with a port
+    /// (e.g., `"127.0.0.1:8125"`, `"[::1]:8125"`, or `"localhost:8125"`).
     pub fn udp(addr: impl Into<String>) -> StatsdExporterBuilder {
         StatsdExporterBuilder {
             target: StatsdTarget::Udp(addr.into()),
@@ -315,7 +319,18 @@ impl StatsdExporter {
         let mut buffer = self.buffer.lock();
         buffer.clear();
 
+        let mut rejected = None;
         for line in lines {
+            if line.len() > self.max_buffer_size {
+                rejected.get_or_insert_with(|| {
+                    ExportError::new(format!(
+                        "metric line is {} bytes, exceeding the {} byte datagram limit",
+                        line.len(),
+                        self.max_buffer_size
+                    ))
+                });
+                continue;
+            }
             if !buffer.is_empty() && buffer.len() + 1 + line.len() > self.max_buffer_size {
                 self.send_buffer(&buffer)?;
                 buffer.clear();
@@ -330,40 +345,70 @@ impl StatsdExporter {
             self.send_buffer(&buffer)?;
         }
 
-        Ok(())
+        match rejected {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     fn send_buffer(&self, data: &str) -> Result<(), ExportError> {
         let bytes = data.as_bytes();
-        match &self.socket {
-            Socket::Udp(sock) => {
-                // Non-blocking send, silently drop on failure
-                let _ = sock.send(bytes);
-            }
+        let sent = match &self.socket {
+            Socket::Udp(socket) => socket.send(bytes),
             #[cfg(unix)]
             Socket::Uds {
                 socket,
                 path,
                 last_inode,
             } => {
-                // Check for inode change (socket replacement)
                 let current_inode = get_inode(path).unwrap_or(0);
-                let stored_inode = last_inode.load(Ordering::Relaxed);
-                if current_inode != stored_inode && current_inode != 0 {
-                    // Socket was replaced, reconnect
+                let mut guard = socket.lock();
+                if guard.is_none()
+                    || (current_inode != 0 && current_inode != last_inode.load(Ordering::Relaxed))
+                {
+                    *guard = Some(
+                        connect_uds(path)
+                            .map_err(|e| ExportError::with_source("UDS connection failed", e))?,
+                    );
                     last_inode.store(current_inode, Ordering::Relaxed);
-                    let mut guard = socket.lock();
-                    *guard = connect_uds(path).ok();
                 }
-
-                let guard = socket.lock();
-                if let Some(ref sock) = *guard {
-                    let _ = sock.send(bytes);
+                let result = guard.as_ref().expect("connected socket").send(bytes);
+                if result.is_err() {
+                    *guard = None;
                 }
+                result
             }
+        }
+        .map_err(|e| ExportError::with_source("metric datagram send failed", e))?;
+        if sent != bytes.len() {
+            return Err(ExportError::new("metric datagram was only partially sent"));
         }
         Ok(())
     }
+}
+
+fn connect_udp(destination: &str) -> io::Result<UdpSocket> {
+    let mut last_error = io::Error::new(
+        io::ErrorKind::AddrNotAvailable,
+        "UDP destination resolved to no addresses",
+    );
+    for address in destination.to_socket_addrs()? {
+        let bind_address = if address.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        };
+        let result = UdpSocket::bind(bind_address).and_then(|socket| {
+            socket.connect(address)?;
+            socket.set_nonblocking(true)?;
+            Ok(socket)
+        });
+        match result {
+            Ok(socket) => return Ok(socket),
+            Err(error) => last_error = error,
+        }
+    }
+    Err(last_error)
 }
 
 fn format_distribution_line(name: &str, value: f64, tags: &str) -> String {

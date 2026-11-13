@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use hashbrown::HashMap;
 use parking_lot::Mutex;
@@ -68,6 +71,7 @@ pub struct StripedAggMap {
     max_buckets: u64,
     initial_error: f64,
     aggregate_histograms: bool,
+    dropped_raw_samples: AtomicU64,
     raw_sender: Option<tokio::sync::mpsc::Sender<RawDistributionPoint>>,
 }
 
@@ -85,6 +89,7 @@ impl StripedAggMap {
             max_buckets,
             initial_error,
             aggregate_histograms: raw_sender.is_none(),
+            dropped_raw_samples: AtomicU64::new(0),
             raw_sender,
         }
     }
@@ -271,14 +276,22 @@ impl StripedAggMap {
         }
         let tags = self.raw_sender.as_ref().map(|_| Arc::clone(&key.tags_data));
         drop(guard);
-        if let (Some(sender), Some(tags)) = (&self.raw_sender, tags) {
-            let _ = sender.try_send(RawDistributionPoint {
-                namespace,
-                metric_name,
-                tags,
-                value,
-            });
+        if let (Some(sender), Some(tags)) = (&self.raw_sender, tags)
+            && sender
+                .try_send(RawDistributionPoint {
+                    namespace,
+                    metric_name,
+                    tags,
+                    value,
+                })
+                .is_err()
+        {
+            self.dropped_raw_samples.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    pub(crate) fn dropped_raw_samples(&self) -> u64 {
+        self.dropped_raw_samples.load(Ordering::Relaxed)
     }
 
     pub fn flush(&self) -> Vec<FlushedMetric> {
