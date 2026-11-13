@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::io;
 use std::net::UdpSocket;
 #[cfg(unix)]
@@ -48,6 +49,8 @@ pub struct StatsdExporter {
     namespace: Option<String>,
     default_tags: Vec<(String, String)>,
     histogram_mode: HistogramExportMode,
+    histogram_mode_explicit: bool,
+    distribution_value_packing: bool,
     max_buffer_size: usize,
     buffer: Mutex<String>,
 }
@@ -58,6 +61,8 @@ pub struct StatsdExporterBuilder {
     namespace: Option<String>,
     default_tags: Vec<(String, String)>,
     histogram_mode: HistogramExportMode,
+    histogram_mode_explicit: bool,
+    distribution_value_packing: bool,
     max_buffer_size: usize,
 }
 
@@ -83,6 +88,15 @@ impl StatsdExporterBuilder {
     /// Set the histogram export mode.
     pub fn histogram_mode(mut self, mode: HistogramExportMode) -> Self {
         self.histogram_mode = mode;
+        self.histogram_mode_explicit = true;
+        self
+    }
+
+    /// Pack original Distribution values with the same series into one message
+    /// (default: true). Requires DogStatsD protocol v1.1: Agent 6.25+ or 7.25+.
+    /// Disable for older agents. Every observation is preserved; this is not sampling.
+    pub fn distribution_value_packing(mut self, enabled: bool) -> Self {
+        self.distribution_value_packing = enabled;
         self
     }
 
@@ -118,6 +132,8 @@ impl StatsdExporterBuilder {
             namespace: self.namespace,
             default_tags: self.default_tags,
             histogram_mode: self.histogram_mode,
+            histogram_mode_explicit: self.histogram_mode_explicit,
+            distribution_value_packing: self.distribution_value_packing,
             max_buffer_size: self.max_buffer_size,
             buffer: Mutex::new(String::with_capacity(self.max_buffer_size)),
         })
@@ -132,6 +148,8 @@ impl StatsdExporter {
             namespace: None,
             default_tags: Vec::new(),
             histogram_mode: HistogramExportMode::default(),
+            histogram_mode_explicit: false,
+            distribution_value_packing: true,
             max_buffer_size: 1432, // safe MTU for UDP
         }
     }
@@ -144,6 +162,8 @@ impl StatsdExporter {
             namespace: None,
             default_tags: Vec::new(),
             histogram_mode: HistogramExportMode::default(),
+            histogram_mode_explicit: false,
+            distribution_value_packing: true,
             max_buffer_size: 8192, // UDS supports larger datagrams
         }
     }
@@ -178,6 +198,7 @@ impl StatsdExporter {
     /// Format all metrics into batched DogStatsD datagrams and send them.
     fn send_metrics(&self, metrics: &[FlushedMetric]) -> Result<(), ExportError> {
         let mut lines = Vec::new();
+        let mut rejected = None;
 
         for metric in metrics {
             let name = self.full_name(metric.namespace, metric.metric_name);
@@ -192,7 +213,7 @@ impl StatsdExporter {
                 }
                 FlushedValue::Histogram(sketch) => match &self.histogram_mode {
                     HistogramExportMode::Distribution => {
-                        return Err(ExportError::new(
+                        rejected.get_or_insert_with(|| ExportError::new(
                             "Distribution requires original samples; use MetricsClient or export_raw_points",
                         ));
                     }
@@ -211,7 +232,11 @@ impl StatsdExporter {
             }
         }
 
-        self.send_lines(lines)
+        let result = self.send_lines(lines);
+        match rejected {
+            Some(error) => Err(error),
+            None => result,
+        }
     }
 
     /// Format raw distribution points into batched DogStatsD datagrams and send them.
@@ -221,12 +246,69 @@ impl StatsdExporter {
                 "Percentiles requires histogram sketches, not raw distribution samples",
             ));
         }
+        if self.distribution_value_packing {
+            return self.send_lines(self.pack_distribution_points(points));
+        }
         let lines = points.iter().map(|point| {
             let name = self.full_name(point.namespace, point.metric_name);
             let tags = self.format_tags(&point.tags.pairs);
             format_distribution_line(&name, point.value, &tags)
         });
         self.send_lines(lines)
+    }
+
+    fn pack_distribution_points(&self, points: &[RawDistributionPoint]) -> Vec<String> {
+        // Compare tag contents, not Arc addresses: direct callers can supply
+        // separately allocated tags, and samples can span aggregation flushes.
+        type Series<'a> = (
+            &'static [&'static str],
+            &'static str,
+            &'a [(&'static str, Cow<'static, str>)],
+        );
+        let mut indices = hashbrown::HashMap::<Series<'_>, usize>::new();
+        let mut groups: Vec<(&RawDistributionPoint, Vec<f64>)> = Vec::new();
+        for point in points {
+            match indices.entry((point.namespace, point.metric_name, &point.tags.pairs)) {
+                hashbrown::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(groups.len());
+                    // Keep the first value in the point itself: unique series
+                    // should not each allocate a separate values buffer.
+                    groups.push((point, Vec::new()));
+                }
+                hashbrown::hash_map::Entry::Occupied(entry) => {
+                    groups[*entry.get()].1.push(point.value);
+                }
+            }
+        }
+
+        let mut lines = Vec::new();
+        for (point, values) in groups {
+            let name = self.full_name(point.namespace, point.metric_name);
+            let tags = self.format_tags(&point.tags.pairs);
+            if values.is_empty() {
+                lines.push(format_distribution_line(&name, point.value, &tags));
+                continue;
+            }
+            let prefix = format!("{name}:");
+            let suffix = format!("|d{tags}");
+            let mut line = prefix.clone();
+            for value in std::iter::once(point.value).chain(values) {
+                let value = value.to_string();
+                if line.len() > prefix.len()
+                    && line.len() + 1 + value.len() + suffix.len() > self.max_buffer_size
+                {
+                    line.push_str(&suffix);
+                    lines.push(std::mem::replace(&mut line, prefix.clone()));
+                }
+                if line.len() > prefix.len() {
+                    line.push(':');
+                }
+                line.push_str(&value);
+            }
+            line.push_str(&suffix);
+            lines.push(line);
+        }
+        lines
     }
 
     fn send_lines(&self, lines: impl IntoIterator<Item = String>) -> Result<(), ExportError> {
@@ -311,6 +393,13 @@ fn get_inode(path: &Path) -> io::Result<u64> {
 
 #[async_trait::async_trait]
 impl Exporter for StatsdExporter {
+    fn configure_distribution(&mut self, legacy_aggregate: bool) -> Option<DistributionInput> {
+        if !legacy_aggregate && !self.histogram_mode_explicit {
+            self.histogram_mode = HistogramExportMode::Distribution;
+        }
+        self.distribution_input()
+    }
+
     fn distribution_input(&self) -> Option<DistributionInput> {
         Some(match self.histogram_mode {
             HistogramExportMode::Distribution => DistributionInput::Raw,

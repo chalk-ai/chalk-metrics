@@ -305,16 +305,53 @@ it never substitutes a sketch's mean. Prometheus and StatsD `Percentiles` reques
 sketches. Registering both kinds records both representations, and each exporter
 receives only its requested histogram input. Counts and gauges are exported once
 per destination. Direct Distribution users must call `export_raw_points`;
-passing histogram sketches to `export` returns an error because original samples
-cannot be reconstructed from a sketch.
+passing histogram sketches to `export` rejects those sketches because original
+samples cannot be reconstructed. Valid counters and gauges in the same batch are
+still sent, and the call returns an error. Do not retry the whole batch blindly:
+some metrics may already have been delivered.
+
+Distribution export packs values with identical namespace, name, and tags into
+DogStatsD protocol v1.1 messages, for example `latency:1:99|d`. Both observations
+are preserved, including repeated values. Packed messages split at the datagram
+byte limit. This requires Datadog Agent 6.25+ (6.x) or 7.25+; use
+`.distribution_value_packing(false)` on the exporter for older agents.
+
+Compared with the former mean-only default, correct Distribution export sends
+one observation per recording call. Packing reduces repeated names and tags,
+but payload size and agent processing still grow with sample rate. It does not
+increase the number of distinct series when names and tags are unchanged.
+StatsD `Percentiles` remains the default and uses local sketches; its per-process
+percentiles cannot be merged into a global percentile. Sampling is not implicit.
 
 ### Migrating the global distribution toggle
 
-Existing `init()`, `try_init()`, and `build_local()` calls remain valid. Remove
-`.aggregate_distr_metrics(...)` when using built-in exporters: their requirements
-now take precedence over either legacy setting. The method is deprecated and
-remains a fallback only for custom exporters whose `distribution_input()` returns
+Existing `init()`, `try_init()`, and `build_local()` calls remain valid. The global
+`.aggregate_distr_metrics(...)` method is deprecated. For compatibility, legacy
+`false` with a StatsD exporter whose histogram mode was never explicitly set
+still emits original `name:v|d` observations (packed by default), preserving metric
+names and types. Without that legacy setting, StatsD still defaults to Percentiles.
+
+Before removing legacy `false`, explicitly select the equivalent exporter mode:
+
+```rust
+let exporter = StatsdExporter::udp("localhost:8125")
+    .histogram_mode(HistogramExportMode::Distribution)
+    .build()?;
+// Register exporter and remove .aggregate_distr_metrics(false).
+```
+
+An explicit `histogram_mode(...)` always wins, including explicit Percentiles with
+legacy `false`. Previously that combination emitted raw `name:v|d` observations;
+it now emits `name.count`, `name.avg`, and `name.p50` (etc.) gauges. Select Distribution
+to retain the old names and types. Prometheus always receives sketches, even with
+legacy `false`, so mixed exporters retain both representations. The legacy setting
+remains the fallback for custom exporters whose `distribution_input()` returns
 `None`: `true` selects sketches and `false` selects raw points, as before.
+
+This preserves source initialization APIs and the common legacy default-StatsD
+configuration. Deliberate behavior changes remain: Distribution preserves every
+observation instead of substituting a mean, explicit modes are honored, and direct
+sketch-to-Distribution export returns an error. See [release notes](CHANGELOG.md).
 
 Custom raw exporters should return `Some(DistributionInput::Raw)` from
 `distribution_input()` and implement `export_raw_points`. Sketch exporters can

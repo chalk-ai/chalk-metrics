@@ -96,10 +96,11 @@ impl MetricsClientBuilder {
     }
 
     /// Legacy fallback for custom exporters without an explicit distribution input.
-    /// Built-in exporters always choose the representation they require. Remove
-    /// this call for built-ins; custom exporters should implement `distribution_input`.
+    /// `false` also preserves Distribution output for StatsD with no explicit mode.
+    /// Explicit StatsD modes and other built-in requirements take precedence.
+    /// Migrate to an explicit exporter mode before removing this call.
     #[deprecated(
-        note = "exporters select distribution input automatically; custom exporters should implement distribution_input"
+        note = "set an explicit StatsD histogram_mode before removing legacy false; custom exporters should implement distribution_input"
     )]
     pub fn aggregate_distr_metrics(mut self, enabled: bool) -> Self {
         self.aggregate_distr_metrics = enabled;
@@ -141,8 +142,10 @@ impl MetricsClientBuilder {
         let exporters: Vec<_> = self
             .exporters
             .into_iter()
-            .map(|exporter| {
-                let input = exporter.distribution_input().unwrap_or(fallback);
+            .map(|mut exporter| {
+                let input = exporter
+                    .configure_distribution(self.aggregate_distr_metrics)
+                    .unwrap_or(fallback);
                 ConfiguredExporter { exporter, input }
             })
             .collect();

@@ -5,6 +5,8 @@ use chalk_metrics::client;
 use chalk_metrics::export::prometheus::PrometheusExporter;
 use chalk_metrics::export::statsd::{HistogramExportMode, StatsdExporter};
 
+mod common;
+
 fn listener() -> UdpSocket {
     let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
     socket
@@ -18,12 +20,9 @@ fn lines(socket: &UdpSocket) -> Vec<String> {
     let mut buffer = [0; 65536];
     loop {
         match socket.recv(&mut buffer) {
-            Ok(n) => lines.extend(
-                std::str::from_utf8(&buffer[..n])
-                    .unwrap()
-                    .lines()
-                    .map(str::to_owned),
-            ),
+            Ok(n) => lines.extend(common::expand_lines(
+                std::str::from_utf8(&buffer[..n]).unwrap(),
+            )),
             Err(error)
                 if matches!(
                     error.kind(),

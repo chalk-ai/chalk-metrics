@@ -133,6 +133,13 @@ pub trait Exporter: Send + Sync {
         None
     }
 
+    /// Client initialization hook. The default preserves custom exporters' requirements.
+    /// StatsD uses legacy `false` as Distribution only when its mode was not set explicitly.
+    #[doc(hidden)]
+    fn configure_distribution(&mut self, _legacy_aggregate: bool) -> Option<DistributionInput> {
+        self.distribution_input()
+    }
+
     /// Export the given batch of flushed metrics.
     ///
     /// Called once per flush interval with all metrics that were aggregated
