@@ -44,6 +44,21 @@ pub fn define_metrics(input: TokenStream) -> TokenStream {
     }
 }
 
+#[proc_macro]
+pub fn define_tag_py_bindings(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as TagPyBindingsInput);
+    expand_tag_py_bindings(input).into()
+}
+
+#[proc_macro]
+pub fn define_metric_py_bindings(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as MetricPyBindingsInput);
+    match expand_metric_py_bindings(input) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
 #[doc(hidden)]
 #[proc_macro]
 pub fn define_metrics_python(input: TokenStream) -> TokenStream {
@@ -344,6 +359,34 @@ struct TagRef {
     alias: Option<Ident>,
 }
 
+struct TagPyBindingsInput {
+    tags: Vec<TagPyBindingDef>,
+}
+
+struct TagPyBindingDef {
+    vis: Visibility,
+    ident: Ident,
+    rust_ty: Path,
+}
+
+struct MetricPyBindingsInput {
+    metrics: Vec<MetricPyBindingDef>,
+}
+
+struct MetricPyBindingDef {
+    vis: Visibility,
+    kind: MetricKind,
+    ident: Ident,
+    rust_ty: Path,
+    tags: Vec<MetricPyBindingTag>,
+}
+
+struct MetricPyBindingTag {
+    field: Ident,
+    py_ty: Path,
+    rust_ty: Path,
+}
+
 impl Parse for MetricsInput {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
         let mut groups = Vec::new();
@@ -457,6 +500,199 @@ impl Parse for TagRef {
             alias,
         })
     }
+}
+
+impl Parse for TagPyBindingsInput {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        let mut tags = Vec::new();
+        while !input.is_empty() {
+            let vis: Visibility = input.parse()?;
+            let ident: Ident = input.parse()?;
+            input.parse::<Token![=>]>()?;
+            let rust_ty: Path = input.parse()?;
+            input.parse::<Token![;]>()?;
+
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+            }
+
+            tags.push(TagPyBindingDef {
+                vis,
+                ident,
+                rust_ty,
+            });
+        }
+        Ok(Self { tags })
+    }
+}
+
+impl Parse for MetricPyBindingsInput {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        let mut metrics = Vec::new();
+        while !input.is_empty() {
+            let vis: Visibility = input.parse()?;
+            let kind_ident: Ident = input.parse()?;
+            let kind = parse_metric_kind(&kind_ident)?;
+            let ident: Ident = input.parse()?;
+            input.parse::<Token![=>]>()?;
+            let rust_ty: Path = input.parse()?;
+
+            let content;
+            braced!(content in input);
+            let tags = Punctuated::<MetricPyBindingTag, Token![,]>::parse_terminated(&content)?
+                .into_iter()
+                .collect();
+
+            if input.peek(Token![;]) {
+                input.parse::<Token![;]>()?;
+            }
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+            }
+
+            metrics.push(MetricPyBindingDef {
+                vis,
+                kind,
+                ident,
+                rust_ty,
+                tags,
+            });
+        }
+        Ok(Self { metrics })
+    }
+}
+
+impl Parse for MetricPyBindingTag {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        let field: Ident = input.parse()?;
+        input.parse::<Token![:]>()?;
+        let py_ty: Path = input.parse()?;
+        input.parse::<Token![=>]>()?;
+        let rust_ty: Path = input.parse()?;
+        Ok(Self {
+            field,
+            py_ty,
+            rust_ty,
+        })
+    }
+}
+
+fn expand_tag_py_bindings(input: TagPyBindingsInput) -> TokenStream2 {
+    let tags = input.tags.into_iter().map(|tag| {
+        let vis = tag.vis;
+        let ident = tag.ident;
+        let rust_ty = tag.rust_ty;
+
+        quote! {
+            #[::pyo3::pyclass(frozen, eq, hash)]
+            #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+            #vis struct #ident {
+                value: String,
+            }
+
+            #[::pyo3::pymethods]
+            impl #ident {
+                #[new]
+                fn new(value: String) -> Self {
+                    Self { value }
+                }
+
+                #[getter]
+                fn value(&self) -> String {
+                    self.value.clone()
+                }
+            }
+
+            impl #ident {
+                pub fn as_str(&self) -> &str {
+                    &self.value
+                }
+
+                pub fn into_value(self) -> String {
+                    self.value
+                }
+
+                pub fn into_rust(self) -> #rust_ty {
+                    ::std::convert::From::from(self.value)
+                }
+            }
+        }
+    });
+
+    quote! { #( #tags )* }
+}
+
+fn expand_metric_py_bindings(input: MetricPyBindingsInput) -> Result<TokenStream2> {
+    let metrics = input
+        .metrics
+        .into_iter()
+        .map(expand_metric_py_binding)
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(quote! { #( #metrics )* })
+}
+
+fn expand_metric_py_binding(metric: MetricPyBindingDef) -> Result<TokenStream2> {
+    let vis = metric.vis;
+    let ident = metric.ident;
+    let rust_ty = metric.rust_ty;
+
+    let constructor_args = metric.tags.iter().map(|tag| {
+        let field = &tag.field;
+        let py_ty = &tag.py_ty;
+        quote! { #field: #py_ty }
+    });
+    let constructor_fields = metric.tags.iter().map(|tag| {
+        let field = &tag.field;
+        let rust_tag_ty = &tag.rust_ty;
+        quote! {
+            #field: <#rust_tag_ty as ::std::convert::From<String>>::from(#field.into_value()),
+        }
+    });
+
+    let record_methods = match metric.kind {
+        MetricKind::Count => quote! {
+            fn record(&self) {
+                self.inner.record();
+            }
+
+            fn record_value(&self, value: i64) {
+                self.inner.record_value(value);
+            }
+        },
+        MetricKind::Gauge | MetricKind::Histogram => quote! {
+            fn record(&self, value: f64) {
+                self.inner.record(value);
+            }
+        },
+    };
+
+    Ok(quote! {
+        #[::pyo3::pyclass(frozen)]
+        #vis struct #ident {
+            inner: #rust_ty,
+        }
+
+        #[::pyo3::pymethods]
+        impl #ident {
+            #[new]
+            fn new(#( #constructor_args ),*) -> Self {
+                Self {
+                    inner: #rust_ty {
+                        #( #constructor_fields )*
+                    },
+                }
+            }
+
+            #record_methods
+        }
+
+        impl #ident {
+            pub fn inner(&self) -> &#rust_ty {
+                &self.inner
+            }
+        }
+    })
 }
 
 fn expand_metrics(input: MetricsInput, python_bindings: bool) -> Result<TokenStream2> {
