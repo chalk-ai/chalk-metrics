@@ -451,6 +451,9 @@ cargo bench
 
 Before/after results, reproduction commands, workload definitions, and the
 measurement environment are recorded in [adoption benchmarks](docs/adoption-benchmarks.md).
+The latest [stack review results](docs/stack-review.md) compare upstream, the
+published stack, and this revision, including the name-hashing hypothesis and
+regression evidence.
 [Machine-readable estimates](docs/benchmark-results.json) include the upstream
 baseline and each implementation stage.
 

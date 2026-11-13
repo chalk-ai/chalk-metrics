@@ -8,6 +8,8 @@ This is a shared virtual machine; contention and UDP timings are especially nois
 The tables below retain the first published stack's measurements. Distribution
 packing and independent raw flushing were subsequently added; their current
 before/after results and limitations are in [distribution volume benchmarks](distribution-volume.md).
+The subsequent review revision, including name-hash measurements, compatibility,
+hostname selection, and UDS backpressure, is in [stack review results](stack-review.md).
 
 The same benchmark harness is used on both implementations. Raw recording uses
 fresh queues with 1,000 observations per batch (below the 16,384 limit), excluding
@@ -51,8 +53,8 @@ benchmarks report 16,000 calls and include thread wakeup/join costs.
 | `contention/count_mixed/8_threads` | 265.033 | 210.782 | -20.5% |
 | `contention/count_mixed/2_threads` | 263.426 | 268.304 | +1.9% |
 
-The identity checks add roughly 6–12% to several counter/gauge update cases on
-this host. Histogram and contention changes vary by workload. Growth avoids the
+Several counter/gauge update cases measured roughly 6–12% slower on this host;
+these timings alone do not isolate the cause. Histogram and contention changes vary by workload. Growth avoids the
 baseline's duplicate entries and allocations. These costs are reported rather
 than hidden behind the incorrect baseline's throughput.
 
@@ -63,7 +65,10 @@ observation. Correct routing preserves observations `1` and `99`, once per
 Distribution destination. Simultaneous sketches retain count 2 and sum 100.
 The revised exporter can encode these as one `latency:1:99|d` message; it is
 still two observations, not an average or a single observation.
-Both legacy toggle settings are tested; neither can disable built-in requirements.
+Both legacy toggle settings are tested. Explicit exporter modes take precedence;
+legacy `false` with unconfigured default StatsD preserves Distribution output.
+Prometheus retains sketches in mixed configurations. See the README migration
+notes for the remaining deliberate behavior changes.
 Directly exporting a sketch as Distribution now returns an error.
 
 The table isolates routing changes against the aggregation PR (its parent), with
