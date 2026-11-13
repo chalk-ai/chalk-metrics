@@ -117,6 +117,6 @@ mod tests {
 
         // Final value should be one of the values written by any thread
         let val = slot.flush().unwrap();
-        assert!(val >= 0.0 && val < 400.0);
+        assert!((0.0..400.0).contains(&val));
     }
 }

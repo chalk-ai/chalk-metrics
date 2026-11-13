@@ -8,7 +8,7 @@ Define your metrics in Rust macro files, then record metrics with zero-allocatio
 
 - **Type-safe recording**: Each metric is a struct with `.record(value)`. Count metrics accept `i64` (or no arg for +1), gauge/histogram accept `f64`. Wrong type = compile error.
 - **Hierarchical namespaces**: Define namespace marker types, including optional parent namespaces. Exporters receive namespace segments and format them (Prometheus uses `_`, StatsD uses `.`).
-- **Zero-allocation hot path**: Striped `parking_lot` locks with `hashbrown::RawEntryMut` — only allocates on first-seen tag combinations.
+- **Zero-allocation hot path**: Striped `parking_lot` locks with consistent `hashbrown::HashMap::entry` operations — only allocates on first-seen tag combinations.
 - **Pluggable exporters**: Prometheus text format and StatsD/DogStatsD included, plus an async `Exporter` trait for custom backends.
 - **Singleton client**: `env_logger`-style `init()`/`try_init()` with automatic shutdown via `atexit`.
 
@@ -383,7 +383,7 @@ Measured on Apple M3 Max, 36 GB RAM, macOS Darwin 25.0.0 arm64, Rust 1.94.0.
 | 1,000 metrics | 5.2 ms | 626 µs |
 
 **Notes:**
-- Count and gauge recording is ~2.6 µs per 1,000 ops (~2.6 ns/op) on the hot path thanks to lock-free atomics
+- The historical numbers above predate the aggregation correctness fix. Recording takes a stripe lock; the slot atomics do not make the full recording path lock-free. See [adoption benchmarks](docs/adoption-benchmarks.md) for measured before/after results.
 - Histogram is slower (~39 ns/op) due to the parking_lot mutex protecting the UDD Sketch
 - StatsD distribution mode is ~8x faster than percentiles mode because it emits 1 line per metric instead of 6 (count + avg + 4 percentiles)
 - Mixed tags benchmarks rotate through 80 tag combinations to simulate realistic cardinality

@@ -35,3 +35,7 @@ harness = false
 [[bench]]
 name = "statsd_export"
 harness = false
+
+[[bench]]
+name = "name_recording"
+harness = false

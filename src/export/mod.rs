@@ -98,6 +98,10 @@ impl ExportError {
 /// The trait is async to support network-bound exporters. The flush worker
 /// calls all registered exporters concurrently.
 #[async_trait::async_trait]
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait annotates its generated boxed futures"
+)]
 pub trait Exporter: Send + Sync {
     /// Export the given batch of flushed metrics.
     ///

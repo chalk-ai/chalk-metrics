@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
+use crate::__private::MetricName;
 use crate::aggregator::striped_map::StripedAggMap;
 use crate::export::Exporter;
 use crate::worker;
@@ -203,10 +204,29 @@ pub fn record_count(
     make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
     delta: i64,
 ) {
+    record_count_named(
+        MetricName::new(metric_name),
+        namespace,
+        tags_hash,
+        make_tags,
+        delta,
+    );
+}
+
+/// Recording support for macro-generated metrics with compile-time name fingerprints.
+#[doc(hidden)]
+#[inline]
+pub fn record_count_named(
+    name: MetricName,
+    namespace: &'static [&'static str],
+    tags_hash: u64,
+    make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
+    delta: i64,
+) {
     if let Some(client) = GLOBAL.get() {
         client
             .aggregator
-            .record_count(metric_name, namespace, tags_hash, make_tags, delta);
+            .record_count_named(name, namespace, tags_hash, make_tags, delta);
     }
 }
 
@@ -219,10 +239,29 @@ pub fn record_gauge(
     make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
     value: f64,
 ) {
+    record_gauge_named(
+        MetricName::new(metric_name),
+        namespace,
+        tags_hash,
+        make_tags,
+        value,
+    );
+}
+
+/// Recording support for macro-generated metrics with compile-time name fingerprints.
+#[doc(hidden)]
+#[inline]
+pub fn record_gauge_named(
+    name: MetricName,
+    namespace: &'static [&'static str],
+    tags_hash: u64,
+    make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
+    value: f64,
+) {
     if let Some(client) = GLOBAL.get() {
         client
             .aggregator
-            .record_gauge(metric_name, namespace, tags_hash, make_tags, value);
+            .record_gauge_named(name, namespace, tags_hash, make_tags, value);
     }
 }
 
@@ -235,10 +274,29 @@ pub fn record_histogram(
     make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
     value: f64,
 ) {
+    record_histogram_named(
+        MetricName::new(metric_name),
+        namespace,
+        tags_hash,
+        make_tags,
+        value,
+    );
+}
+
+/// Recording support for macro-generated metrics with compile-time name fingerprints.
+#[doc(hidden)]
+#[inline]
+pub fn record_histogram_named(
+    name: MetricName,
+    namespace: &'static [&'static str],
+    tags_hash: u64,
+    make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
+    value: f64,
+) {
     if let Some(client) = GLOBAL.get() {
         client
             .aggregator
-            .record_histogram(metric_name, namespace, tags_hash, make_tags, value);
+            .record_histogram_named(name, namespace, tags_hash, make_tags, value);
     }
 }
 
@@ -319,8 +377,8 @@ mod tests {
             .build_local();
 
         client.record_count("test_count", &[], 100, || vec![("k", "v".into())], 5);
-        client.record_gauge("test_gauge", &[], 200, || vec![], 42.0);
-        client.record_histogram("test_hist", &[], 300, || vec![], 10.0);
+        client.record_gauge("test_gauge", &[], 200, Vec::new, 42.0);
+        client.record_histogram("test_hist", &[], 300, Vec::new, 10.0);
 
         let flushed = client.flush();
         assert_eq!(flushed.len(), 3);
@@ -339,7 +397,7 @@ mod tests {
             .flush_interval(Duration::from_millis(50))
             .build_local();
 
-        client.record_count("c", &[], 100, || vec![], 1);
+        client.record_count("c", &[], 100, Vec::new, 1);
 
         std::thread::sleep(Duration::from_millis(150));
         assert!(export_count.load(Ordering::Relaxed) > 0);
@@ -378,7 +436,7 @@ mod tests {
             .aggregate_distr_metrics(false)
             .build_local();
 
-        client.record_histogram("h", &[], 100, || vec![], 1.0);
+        client.record_histogram("h", &[], 100, Vec::new, 1.0);
 
         std::thread::sleep(Duration::from_millis(150));
         assert!(raw_count.load(Ordering::Relaxed) > 0);
@@ -397,7 +455,7 @@ mod tests {
             .flush_interval(Duration::from_millis(50))
             .build_local();
 
-        client.record_histogram("h", &[], 100, || vec![], 1.0);
+        client.record_histogram("h", &[], 100, Vec::new, 1.0);
 
         std::thread::sleep(Duration::from_millis(150));
         assert_eq!(raw_count.load(Ordering::Relaxed), 0);
@@ -406,9 +464,9 @@ mod tests {
 
     #[test]
     fn test_noop_when_not_initialized() {
-        record_count("noop", &[], 0, || vec![], 1);
-        record_gauge("noop", &[], 0, || vec![], 1.0);
-        record_histogram("noop", &[], 0, || vec![], 1.0);
+        record_count("noop", &[], 0, Vec::new, 1);
+        record_gauge("noop", &[], 0, Vec::new, 1.0);
+        record_histogram("noop", &[], 0, Vec::new, 1.0);
     }
 
     #[test]
