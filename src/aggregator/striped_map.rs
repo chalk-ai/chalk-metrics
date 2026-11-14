@@ -64,13 +64,38 @@ impl std::hash::Hash for SeriesKey {
     }
 }
 
-type Stripe = Mutex<HashMap<SeriesKey, (AggKey, AggSlot)>>;
+/// One map entry: the series' key and slot plus flush bookkeeping. Both
+/// bookkeeping fields are written only with the stripe lock held.
+struct AggEntry {
+    key: AggKey,
+    slot: AggSlot,
+    /// A record hit this entry since the last flush.
+    touched: bool,
+    /// Consecutive flushes without a record (only counted when retaining).
+    idle_flushes: u32,
+}
+
+impl AggEntry {
+    fn new(key: AggKey, slot: AggSlot) -> Self {
+        Self {
+            key,
+            slot,
+            touched: true,
+            idle_flushes: 0,
+        }
+    }
+}
+
+type Stripe = Mutex<HashMap<SeriesKey, AggEntry>>;
 
 pub struct StripedAggMap {
     stripes: Box<[Stripe]>,
     max_buckets: u64,
     initial_error: f64,
     aggregate_histograms: bool,
+    /// Flushes without a record after which an idle count, histogram or
+    /// raw-distribution entry is removed. 0 removes them at every flush.
+    retain_idle_flushes: u32,
     dropped_raw_samples: AtomicU64,
     tag_hash_collisions: AtomicU64,
     raw_sender: Option<tokio::sync::mpsc::Sender<RawDistributionPoint>>,
@@ -90,6 +115,7 @@ impl StripedAggMap {
             max_buckets,
             initial_error,
             aggregate_histograms: raw_sender.is_none(),
+            retain_idle_flushes: 0,
             dropped_raw_samples: AtomicU64::new(0),
             tag_hash_collisions: AtomicU64::new(0),
             raw_sender,
@@ -98,6 +124,11 @@ impl StripedAggMap {
 
     pub(crate) fn with_histogram_aggregation(mut self, enabled: bool) -> Self {
         self.aggregate_histograms = enabled;
+        self
+    }
+
+    pub(crate) fn with_retained_idle_flushes(mut self, flushes: u32) -> Self {
+        self.retain_idle_flushes = flushes;
         self
     }
 
@@ -145,8 +176,10 @@ impl StripedAggMap {
 
         match entry {
             hashbrown::hash_map::Entry::Occupied(e) => {
-                self.check_tags(&e.get().0, tags_match);
-                if let AggSlot::Count(ref slot) = e.get().1 {
+                let entry = e.into_mut();
+                self.check_tags(&entry.key, tags_match);
+                self.mark_touched(entry);
+                if let AggSlot::Count(ref slot) = entry.slot {
                     slot.record(delta);
                 }
             }
@@ -158,7 +191,7 @@ impl StripedAggMap {
                     metric_name,
                     tags_data: Arc::new(TagsData { pairs: make_tags() }),
                 };
-                e.insert((key, AggSlot::Count(slot)));
+                e.insert(AggEntry::new(key, AggSlot::Count(slot)));
             }
         }
     }
@@ -207,8 +240,9 @@ impl StripedAggMap {
 
         match entry {
             hashbrown::hash_map::Entry::Occupied(e) => {
-                self.check_tags(&e.get().0, tags_match);
-                if let AggSlot::Gauge(ref slot) = e.get().1 {
+                // Gauges persist in both modes, so they need no bookkeeping.
+                self.check_tags(&e.get().key, tags_match);
+                if let AggSlot::Gauge(ref slot) = e.get().slot {
                     slot.record(value);
                 }
             }
@@ -220,7 +254,7 @@ impl StripedAggMap {
                     metric_name,
                     tags_data: Arc::new(TagsData { pairs: make_tags() }),
                 };
-                e.insert((key, AggSlot::Gauge(slot)));
+                e.insert(AggEntry::new(key, AggSlot::Gauge(slot)));
             }
         }
     }
@@ -258,7 +292,7 @@ impl StripedAggMap {
         let metric_name = name.as_str();
         let stripe_idx = combined as usize & STRIPE_MASK;
         let mut guard = self.stripes[stripe_idx].lock();
-        let (key, slot) = match guard.entry(SeriesKey {
+        let entry = match guard.entry(SeriesKey {
             fingerprint: combined,
             namespace,
             metric_name,
@@ -266,8 +300,9 @@ impl StripedAggMap {
             kind: MetricKind::Histogram,
         }) {
             hashbrown::hash_map::Entry::Occupied(e) => {
-                self.check_tags(&e.get().0, tags_match);
-                e.into_mut()
+                let entry = e.into_mut();
+                self.check_tags(&entry.key, tags_match);
+                entry
             }
             hashbrown::hash_map::Entry::Vacant(e) => {
                 let slot = if self.aggregate_histograms {
@@ -275,7 +310,7 @@ impl StripedAggMap {
                 } else {
                     AggSlot::RawDistribution
                 };
-                e.insert((
+                e.insert(AggEntry::new(
                     AggKey {
                         namespace,
                         metric_name,
@@ -285,10 +320,14 @@ impl StripedAggMap {
                 ))
             }
         };
-        if let AggSlot::Histogram(slot) = slot {
+        self.mark_touched(entry);
+        if let AggSlot::Histogram(slot) = &entry.slot {
             slot.record(value);
         }
-        let tags = self.raw_sender.as_ref().map(|_| Arc::clone(&key.tags_data));
+        let tags = self
+            .raw_sender
+            .as_ref()
+            .map(|_| Arc::clone(&entry.key.tags_data));
         drop(guard);
         if let (Some(sender), Some(tags)) = (&self.raw_sender, tags)
             && sender
@@ -323,6 +362,16 @@ impl StripedAggMap {
         self.tag_hash_collisions.load(Ordering::Relaxed)
     }
 
+    /// Note that a record hit `entry` since the last flush. Only retention
+    /// reads the flag, so with retention off nothing is written, and with it on
+    /// the entry is written once per flush instead of on every record.
+    #[inline]
+    fn mark_touched(&self, entry: &mut AggEntry) {
+        if self.retain_idle_flushes > 0 && !entry.touched {
+            entry.touched = true;
+        }
+    }
+
     pub(crate) fn dropped_raw_samples(&self) -> u64 {
         self.dropped_raw_samples.load(Ordering::Relaxed)
     }
@@ -332,7 +381,12 @@ impl StripedAggMap {
 
         for stripe in self.stripes.iter() {
             let mut guard = stripe.lock();
-            guard.retain(|_combined, (key, slot)| match slot {
+            if self.retain_idle_flushes > 0 {
+                let max_idle = self.retain_idle_flushes;
+                guard.retain(|_combined, entry| flush_retaining(entry, max_idle, &mut flushed));
+                continue;
+            }
+            guard.retain(|_combined, AggEntry { key, slot, .. }| match slot {
                 AggSlot::RawDistribution => false,
                 AggSlot::Count(count_slot) => {
                     let value = count_slot.flush();
@@ -372,6 +426,56 @@ impl StripedAggMap {
 
         flushed
     }
+}
+
+/// Flush one entry when idle series are retained. Returns whether to keep it.
+/// A touched entry is flushed as usual and kept; an untouched one emits
+/// nothing and is removed once it has been idle for `max_idle` flushes.
+fn flush_retaining(entry: &mut AggEntry, max_idle: u32, flushed: &mut Vec<FlushedMetric>) -> bool {
+    let AggEntry {
+        key,
+        slot,
+        touched,
+        idle_flushes,
+    } = entry;
+    if let AggSlot::Gauge(gauge_slot) = slot {
+        if let Some(value) = gauge_slot.flush() {
+            flushed.push(FlushedMetric {
+                namespace: key.namespace,
+                metric_name: key.metric_name,
+                tags: Arc::clone(&key.tags_data),
+                value: FlushedValue::Gauge(value),
+            });
+        }
+        return true;
+    }
+    if !*touched {
+        *idle_flushes = idle_flushes.saturating_add(1);
+        return *idle_flushes < max_idle;
+    }
+    *touched = false;
+    *idle_flushes = 0;
+    match slot {
+        AggSlot::Count(count_slot) => flushed.push(FlushedMetric {
+            namespace: key.namespace,
+            metric_name: key.metric_name,
+            tags: Arc::clone(&key.tags_data),
+            value: FlushedValue::Count(count_slot.flush()),
+        }),
+        AggSlot::Histogram(hist_slot) => {
+            let sketch = hist_slot.flush();
+            if sketch.count() > 0 {
+                flushed.push(FlushedMetric {
+                    namespace: key.namespace,
+                    metric_name: key.metric_name,
+                    tags: Arc::clone(&key.tags_data),
+                    value: FlushedValue::Histogram(sketch),
+                });
+            }
+        }
+        AggSlot::RawDistribution | AggSlot::Gauge(_) => {}
+    }
+    true
 }
 
 /// Placement hint only: full series identity is compared by HashMap::entry.
@@ -712,5 +816,159 @@ mod tests {
         map.record_count("c", &[], 1, || vec![("k", "a".into())], 1);
         map.record_count("c", &[], 1, || vec![("k", "b".into())], 1);
         assert_eq!(map.tag_hash_collisions(), 0);
+    }
+
+    fn entry_count(map: &StripedAggMap) -> usize {
+        map.stripes.iter().map(|stripe| stripe.lock().len()).sum()
+    }
+
+    fn retaining_map(flushes: u32) -> StripedAggMap {
+        make_map().with_retained_idle_flushes(flushes)
+    }
+
+    #[test]
+    fn default_flush_removes_entries_of_every_kind_except_gauges() {
+        let map = make_map();
+        map.record_count("c", &[], 1, Vec::new, 1);
+        map.record_gauge("g", &[], 2, Vec::new, 1.0);
+        map.record_histogram("h", &[], 3, Vec::new, 1.0);
+        assert_eq!(entry_count(&map), 3);
+        assert_eq!(map.flush().len(), 3);
+        assert_eq!(entry_count(&map), 1);
+    }
+
+    #[test]
+    fn retained_count_keeps_tags_and_emits_only_new_delta() {
+        let map = retaining_map(2);
+        map.record_count("c", &[], 1, || vec![("k", "v".into())], 5);
+        let flushed = map.flush();
+        assert_eq!(flushed.len(), 1);
+        assert!(matches!(flushed[0].value, FlushedValue::Count(5)));
+        assert_eq!(entry_count(&map), 1);
+
+        map.record_count("c", &[], 1, || panic!("series was retained"), 3);
+        let flushed = map.flush();
+        assert_eq!(flushed.len(), 1);
+        assert!(matches!(flushed[0].value, FlushedValue::Count(3)));
+        assert_eq!(flushed[0].tags.pairs, [("k", "v".into())]);
+    }
+
+    #[test]
+    fn retained_count_is_evicted_after_idle_flushes() {
+        let map = retaining_map(2);
+        map.record_count("c", &[], 1, Vec::new, 5);
+        assert_eq!(map.flush().len(), 1);
+        // Untouched retained counts emit nothing.
+        assert_eq!(map.flush().len(), 0);
+        assert_eq!(entry_count(&map), 1);
+        assert_eq!(map.flush().len(), 0);
+        assert_eq!(entry_count(&map), 0);
+
+        let made = std::cell::Cell::new(false);
+        map.record_count(
+            "c",
+            &[],
+            1,
+            || {
+                made.set(true);
+                Vec::new()
+            },
+            1,
+        );
+        assert!(made.get(), "evicted series registers again");
+        assert_eq!(map.flush().len(), 1);
+    }
+
+    #[test]
+    fn a_record_resets_the_idle_count() {
+        let map = retaining_map(2);
+        map.record_count("c", &[], 1, Vec::new, 1);
+        map.flush();
+        map.flush(); // idle 1
+        map.record_count("c", &[], 1, || panic!("still retained"), 1);
+        assert_eq!(map.flush().len(), 1); // touched: idle back to 0
+        map.flush(); // idle 1
+        assert_eq!(entry_count(&map), 1);
+        map.flush(); // idle 2: removed
+        assert_eq!(entry_count(&map), 0);
+    }
+
+    #[test]
+    fn touched_count_summing_to_zero_still_emits_zero() {
+        let map = retaining_map(2);
+        map.record_count("c", &[], 1, Vec::new, 4);
+        map.record_count("c", &[], 1, Vec::new, -4);
+        let flushed = map.flush();
+        assert_eq!(flushed.len(), 1);
+        assert!(matches!(flushed[0].value, FlushedValue::Count(0)));
+        map.record_count("c", &[], 1, Vec::new, 2);
+        map.record_count("c", &[], 1, Vec::new, -2);
+        let flushed = map.flush();
+        assert_eq!(flushed.len(), 1);
+        assert!(matches!(flushed[0].value, FlushedValue::Count(0)));
+        assert_eq!(map.flush().len(), 0);
+    }
+
+    #[test]
+    fn retained_histogram_emits_only_when_touched_and_is_evicted() {
+        let map = retaining_map(2);
+        map.record_histogram("h", &[], 1, || vec![("k", "v".into())], 1.0);
+        map.record_histogram("h", &[], 1, || panic!("cached"), 3.0);
+        let flushed = map.flush();
+        assert_eq!(flushed.len(), 1);
+        assert!(matches!(&flushed[0].value, FlushedValue::Histogram(s) if s.count() == 2));
+
+        map.record_histogram("h", &[], 1, || panic!("series was retained"), 10.0);
+        let flushed = map.flush();
+        assert_eq!(flushed.len(), 1);
+        match &flushed[0].value {
+            FlushedValue::Histogram(s) => {
+                assert_eq!(s.count(), 1);
+                assert_eq!(s.sum(), 10.0);
+            }
+            _ => panic!("expected histogram"),
+        }
+        assert_eq!(map.flush().len(), 0);
+        assert_eq!(entry_count(&map), 1);
+        assert_eq!(map.flush().len(), 0);
+        assert_eq!(entry_count(&map), 0);
+    }
+
+    #[test]
+    fn gauges_behave_the_same_when_retaining() {
+        let map = retaining_map(1);
+        map.record_gauge("g", &[], 1, Vec::new, 7.0);
+        for _ in 0..3 {
+            let flushed = map.flush();
+            assert_eq!(flushed.len(), 1);
+            assert!(matches!(flushed[0].value, FlushedValue::Gauge(v) if v == 7.0));
+            assert_eq!(entry_count(&map), 1);
+        }
+        map.record_gauge("g", &[], 1, || panic!("gauge persists"), 8.0);
+        assert!(matches!(map.flush()[0].value, FlushedValue::Gauge(v) if v == 8.0));
+    }
+
+    #[test]
+    fn raw_distribution_entries_are_retained_and_evicted() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let map = StripedAggMap::new(200, 0.001, Some(tx)).with_retained_idle_flushes(2);
+        map.record_histogram("h", &[], 1, || vec![("k", "v".into())], 1.0);
+        assert_eq!(entry_count(&map), 1);
+        assert_eq!(map.flush().len(), 0, "raw entries never emit");
+        assert_eq!(entry_count(&map), 1);
+        map.record_histogram("h", &[], 1, || panic!("tags cached"), 2.0);
+        assert_eq!(map.flush().len(), 0);
+        assert_eq!(entry_count(&map), 1);
+        map.flush();
+        assert_eq!(entry_count(&map), 1);
+        map.flush();
+        assert_eq!(entry_count(&map), 0);
+
+        // Without retention the raw entry goes at the first flush.
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let map = StripedAggMap::new(200, 0.001, Some(tx));
+        map.record_histogram("h", &[], 1, Vec::new, 1.0);
+        map.flush();
+        assert_eq!(entry_count(&map), 0);
     }
 }

@@ -47,6 +47,14 @@ fn local_client() -> MetricsClient {
         .build_local()
 }
 
+/// A client that keeps idle series for `flushes` flushes.
+fn retaining_client(flushes: u32) -> MetricsClient {
+    client::builder()
+        .flush_interval(Duration::from_secs(3600))
+        .retain_idle_series(flushes)
+        .build_local()
+}
+
 /// Well-distributed tag hashes, so the series spread evenly over the stripes.
 fn series_hashes(series: usize) -> Vec<u64> {
     use std::hash::{Hash, Hasher};
@@ -168,6 +176,18 @@ fn flush_benchmarks(c: &mut Criterion) {
         }
     }
 
+    // One flush over 100,000 retained count series that nobody recorded since
+    // the previous flush: the walk emits nothing and evicts nothing.
+    let hashes = series_hashes(100_000);
+    group.throughput(Throughput::Elements(100_000));
+    group.bench_function(BenchmarkId::new("idle_retained", "100000_series"), |b| {
+        let client = retaining_client(u32::MAX);
+        populate(&client, "count", &hashes, &latencies);
+        drop(client.flush());
+        b.iter(|| assert!(black_box(client.flush()).is_empty()));
+        client.shutdown();
+    });
+
     group.finish();
 }
 
@@ -186,6 +206,22 @@ fn record_after_flush_benchmarks(c: &mut Criterion) {
 
     group.bench_function("after_flush", |b| {
         let client = local_client();
+        b.iter_custom(|iters| {
+            let mut elapsed = Duration::ZERO;
+            for _ in 0..iters {
+                populate(&client, "count", &hashes, &[]);
+                drop(black_box(client.flush()));
+                let start = Instant::now();
+                record_pass(&client, "count", &hashes, &[], 1);
+                elapsed += start.elapsed();
+            }
+            elapsed
+        });
+        client.shutdown();
+    });
+
+    group.bench_function("after_flush_retained", |b| {
+        let client = retaining_client(4);
         b.iter_custom(|iters| {
             let mut elapsed = Duration::ZERO;
             for _ in 0..iters {
