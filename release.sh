@@ -6,13 +6,20 @@ set -euo pipefail
 # tag and publishes to crates.io. Prerelease tags use Cargo semver: v0.1.0-rc.1.
 
 TAG_PREFIX="${1:-v}"
-LAST_TAG=""
-while IFS= read -r tag; do
-    if [[ "$tag" == "${TAG_PREFIX}"* ]]; then
-        LAST_TAG="$tag"
-        break
-    fi
-done < <(gh release list --limit 1000 --json tagName --jq '.[].tagName')
+
+# Refuse to release unless every check on main's head commit passed: the
+# release goes public before the publish workflow runs its own checks.
+MAIN_SHA=$(gh api 'repos/{owner}/{repo}/commits/main' --jq .sha)
+NOT_GREEN=$(gh api "repos/{owner}/{repo}/commits/${MAIN_SHA}/check-runs" \
+    --jq '(.check_runs | length == 0) or any(.check_runs[]; .conclusion != "success" and .conclusion != "skipped")')
+if [[ "$NOT_GREEN" != "false" ]]; then
+    echo "CI on main (${MAIN_SHA:0:7}) is not green yet; wait for it or fix it before releasing." >&2
+    exit 1
+fi
+
+# Highest published (non-draft) release by semver; -rc.N sorts below its release.
+TAGS=$(gh release list --exclude-drafts --limit 1000 --json tagName --jq '.[].tagName')
+LAST_TAG=$(grep "^${TAG_PREFIX}[0-9]" <<<"$TAGS" | sed 's/-rc\./~rc./' | sort -V | tail -1 | sed 's/~rc\./-rc./' || true)
 LAST_TAG="${LAST_TAG:-"${TAG_PREFIX}0.0.0"}"
 
 highlight_version() {
@@ -174,4 +181,9 @@ PRERELEASE_FLAG=""
 if [[ "$NEXT_TAG" == *-rc.* ]]; then
     PRERELEASE_FLAG="--prerelease"
 fi
-confirm "Submit to GitHub (y/N)?" && echo "Submitting..." && gh release create "${NEXT_TAG}" --generate-notes ${PRERELEASE_FLAG}
+if confirm "Submit to GitHub (y/N)?"; then
+    echo "Submitting..."
+    gh release create "${NEXT_TAG}" --generate-notes ${PRERELEASE_FLAG}
+else
+    echo "Aborted."
+fi

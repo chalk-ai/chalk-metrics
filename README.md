@@ -479,4 +479,11 @@ GitHub release, asks for a patch, minor, major, or rc bump (for example
 Publishing the release runs the publish workflow, which writes the tag's version
 into both crates, runs the tests, and publishes `chalk-metrics-macros` and then
 `chalk-metrics` to crates.io. The `version` fields on `main` are placeholders;
-the tag decides the published version.
+the tag decides the published version. `make release` refuses to run until CI on
+`main` is green.
+
+The release is public before the publish workflow runs. If that workflow fails
+before uploading anything, delete the release and its tag
+(`gh release delete vX.Y.Z --cleanup-tag`) and run `make release` again. If
+`chalk-metrics-macros` was uploaded but `chalk-metrics` was not, publish the
+rest by hand from the tag with the version set to match.
