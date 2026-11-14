@@ -178,7 +178,7 @@ impl StripedAggMap {
             hashbrown::hash_map::Entry::Occupied(e) => {
                 let entry = e.into_mut();
                 self.check_tags(&entry.key, tags_match);
-                entry.touched = true;
+                self.mark_touched(entry);
                 if let AggSlot::Count(ref slot) = entry.slot {
                     slot.record(delta);
                 }
@@ -320,7 +320,7 @@ impl StripedAggMap {
                 ))
             }
         };
-        entry.touched = true;
+        self.mark_touched(entry);
         if let AggSlot::Histogram(slot) = &entry.slot {
             slot.record(value);
         }
@@ -360,6 +360,16 @@ impl StripedAggMap {
 
     pub(crate) fn tag_hash_collisions(&self) -> u64 {
         self.tag_hash_collisions.load(Ordering::Relaxed)
+    }
+
+    /// Note that a record hit `entry` since the last flush. Only retention
+    /// reads the flag, so with retention off nothing is written, and with it on
+    /// the entry is written once per flush instead of on every record.
+    #[inline]
+    fn mark_touched(&self, entry: &mut AggEntry) {
+        if self.retain_idle_flushes > 0 && !entry.touched {
+            entry.touched = true;
+        }
     }
 
     pub(crate) fn dropped_raw_samples(&self) -> u64 {
