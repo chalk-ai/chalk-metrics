@@ -411,8 +411,9 @@ chalk_metrics::client::builder()
 `initial_error` is the relative error a histogram starts with, not a bound that
 holds forever. When a histogram needs more than `max_buckets` buckets, adjacent
 buckets are merged and the error grows. After compaction the error depends on
-the bucket count and the value range, and is at most
-`tanh(ln(max / min) / max_buckets)` for the values recorded in that interval.
+the bucket count and the value range. For positive values it is at most
+`tanh(ln(max / min) / (max_buckets - 1))` over the values recorded in that
+interval.
 
 ### Flush latency, overflow, and shutdown
 
@@ -448,12 +449,13 @@ for exceeding `max_buffer_size` (counted in lines and bytes only). Datagrams are
 sent while later lines are still being formatted, which keeps bursts small.
 
 A series is identified by its metric, namespace and a 64-bit hash of its tag
-values. Each recording that hits an existing series compares the tag values
-with the stored ones; a mismatch (a hash collision) is counted by
-`client.tag_hash_collisions()` (local clients) or
-`chalk_metrics::client::tag_hash_collisions()` (global client) and the value is
-still added to the existing series. A non-zero count means two series were
-merged.
+values. When a macro-generated metric hits an existing series, its tag keys and
+values are compared with the stored ones; a mismatch (a hash collision) is
+counted by `chalk_metrics::client::tag_hash_collisions()` and the value is still
+added to the existing series, so a non-zero count means two series were merged.
+The string recording functions (`client::record_count` and friends, and a local
+`MetricsClient`) take the hash from the caller and are not checked, so
+`MetricsClient::tag_hash_collisions()` stays zero for them.
 
 UDP accepts IPv4, bracketed IPv6, and hostnames with ports. Dual-stack hostnames
 prefer IPv4, preserving `localhost` delivery to IPv4-only agents. Explicit IPv6
