@@ -441,7 +441,7 @@ fn flush_retaining(entry: &mut AggEntry, max_idle: u32, flushed: &mut Vec<Flushe
         return true;
     }
     if !*touched {
-        *idle_flushes += 1;
+        *idle_flushes = idle_flushes.saturating_add(1);
         return *idle_flushes < max_idle;
     }
     *touched = false;
