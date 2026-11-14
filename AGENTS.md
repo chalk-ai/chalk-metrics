@@ -40,6 +40,7 @@ Guidance for coding agents working in this repository.
 - Struct field names default to the tag type's snake_case name, or use `Tag as field_name` aliases
 - Optional tags are declared as `optional TagType` and generate `Option<TagType>` fields
 - Associated const `NAME` and method `namespace()` provide metric identity
+- Every metric with tags also expands to a borrowed `<Metric>Ref<'a>` struct (string tags `&'a str`, enum tags the enum; same fields, order, aliases, visibility). It owns the recording logic (`tags_hash`, `tags_match`, `export_pairs`); the owned struct's `record`/`record_value` call `self.borrowed()`, so both forms are one series and the tag hash is identical. Recording through `Ref` allocates nothing on a hit. Untagged metrics have no `Ref` struct
 
 ### Aggregation
 - `src/aggregator/striped_map.rs` — 64-stripe concurrent map using `parking_lot::Mutex` and the `hashbrown` `Entry` API
@@ -63,6 +64,7 @@ Guidance for coding agents working in this repository.
 - Tag values use `Cow<'static, str>` — enum tags are `Cow::Borrowed(&'static str)` (zero allocation), string tags are `Cow::Owned(String)`
 - `TagsData.pairs` is `Vec<(&'static str, Cow<'static, str>)>`
 - Aliased tags use the alias identifier as both the struct field name and export key for that metric
+- Tag types implement the hidden `MetricTag` trait, whose `type Ref<'a>` is `&'a str` (string tags) or `Self` (enum tags); `TagRef` is the borrowed-value trait (`value_str`, `export_value`). The owned struct records through `borrowed()`, so the `Ref` struct's derived `Hash` is the only tag hash and both forms are one series by construction
 
 ### Flush Behavior
 - Counts and histograms are drained from the map on flush

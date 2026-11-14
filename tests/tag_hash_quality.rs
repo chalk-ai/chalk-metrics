@@ -1,7 +1,7 @@
 //! The tag hash is the series identity (collisions are detected, not avoided),
-//! so it must not collide on tag sets shaped like real ones. Generated metric
-//! structs derive `Hash`; `tags_hash()` feeds them to `tag_hasher()`, which is
-//! reproduced here.
+//! so it must not collide on tag sets shaped like real ones. Generated metrics
+//! record through their borrowed `Ref` struct, whose derived `Hash` is fed to
+//! `tag_hasher()` by `tags_hash()`; that is reproduced here.
 use std::hash::{Hash, Hasher};
 
 use chalk_metrics::__private::tag_hasher;
@@ -80,28 +80,37 @@ fn assert_no_collisions(total: u64) {
     let mut hashes = Vec::with_capacity(total as usize);
 
     for i in 0..a {
-        hashes.push(hash_of(&StringAndEnum {
-            endpoint: Endpoint::from(format!("/api/v1/users/{}/orders", i / 2)),
-            status: status(i % 2),
-        }));
+        hashes.push(hash_of(
+            &StringAndEnum {
+                endpoint: Endpoint::from(format!("/api/v1/users/{}/orders", i / 2)),
+                status: status(i % 2),
+            }
+            .borrowed(),
+        ));
     }
     // Mixed radix: tenant (1000) x region (8) x status (2) x method (2), then endpoint.
     for i in 0..b {
-        hashes.push(hash_of(&FiveTags {
-            endpoint: Endpoint::from(format!("/v2/items/{}", i / 32_000)),
-            region: Region::from(REGIONS[(i / 1000 % 8) as usize]),
-            tenant: Tenant::from(format!("tenant-{:04}", i % 1000)),
-            status: status(i / 8000 % 2),
-            method: method(i / 16_000 % 2),
-        }));
+        hashes.push(hash_of(
+            &FiveTags {
+                endpoint: Endpoint::from(format!("/v2/items/{}", i / 32_000)),
+                region: Region::from(REGIONS[(i / 1000 % 8) as usize]),
+                tenant: Tenant::from(format!("tenant-{:04}", i % 1000)),
+                status: status(i / 8000 % 2),
+                method: method(i / 16_000 % 2),
+            }
+            .borrowed(),
+        ));
     }
     for i in 0..c {
         let id = splitmix(i);
-        hashes.push(hash_of(&IdsPathsNames {
-            id: Id::from(format!("{id:016x}")),
-            path: Path::from(format!("/v1/{}/{}", id % 977, i)),
-            dotted: Dotted::from(format!("svc.team{}.module{}.handler", i % 31, i % 7)),
-        }));
+        hashes.push(hash_of(
+            &IdsPathsNames {
+                id: Id::from(format!("{id:016x}")),
+                path: Path::from(format!("/v1/{}/{}", id % 977, i)),
+                dotted: Dotted::from(format!("svc.team{}.module{}.handler", i % 31, i % 7)),
+            }
+            .borrowed(),
+        ));
     }
 
     assert_eq!(hashes.len() as u64, total);

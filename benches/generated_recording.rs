@@ -8,6 +8,8 @@
 //! Case names:
 //! - `built`: the metric struct is constructed inside the loop from
 //!   `black_box(&str)` values, so every call pays for its `String` tags.
+//! - `borrowed`: the metric's `<Metric>Ref` struct, constructed inside the loop
+//!   from the same `black_box(&str)` values; no `String` is built.
 //! - `prebuilt`: the struct is constructed once outside the loop and each call
 //!   is `.record()` on `black_box(&metric)`.
 //! - `uninitialized/*` run before the global client is initialized: what a
@@ -146,6 +148,26 @@ fn histogram_5_tags() -> Histogram5Tags {
     }
 }
 
+fn count_5_tags_borrowed() -> Count5TagsRef<'static> {
+    Count5TagsRef {
+        endpoint: black_box(ENDPOINT),
+        region: black_box(REGION),
+        tenant: black_box(TENANT),
+        status: Status::Success,
+        method: Method::Post,
+    }
+}
+
+fn histogram_5_tags_borrowed() -> Histogram5TagsRef<'static> {
+    Histogram5TagsRef {
+        endpoint: black_box(ENDPOINT),
+        region: black_box(REGION),
+        tenant: black_box(TENANT),
+        status: Status::Success,
+        method: Method::Post,
+    }
+}
+
 fn bench_calls(group: &mut BenchmarkGroup<'_, WallTime>, name: &str, mut call: impl FnMut()) {
     group.bench_function(name, |b| {
         b.iter(|| {
@@ -172,6 +194,17 @@ fn generated_recording(c: &mut Criterion) {
         }
         .record()
     });
+    bench_calls(
+        &mut group,
+        "uninitialized/count/string_enum_borrowed",
+        || {
+            CountStringEnumRef {
+                endpoint: black_box(ENDPOINT),
+                status: Status::Success,
+            }
+            .record()
+        },
+    );
 
     client::builder()
         .flush_interval(Duration::from_secs(3600))
@@ -212,14 +245,31 @@ fn generated_recording(c: &mut Criterion) {
         }
         .record()
     });
+    bench_calls(&mut group, "count/string_enum_borrowed", || {
+        CountStringEnumRef {
+            endpoint: black_box(ENDPOINT),
+            status: Status::Success,
+        }
+        .record()
+    });
     let prebuilt_5_tags = count_5_tags();
     bench_calls(&mut group, "count/5_tags_prebuilt", || {
         black_box(&prebuilt_5_tags).record()
     });
     bench_calls(&mut group, "count/5_tags_built", || count_5_tags().record());
+    bench_calls(&mut group, "count/5_tags_borrowed", || {
+        count_5_tags_borrowed().record()
+    });
     bench_calls(&mut group, "gauge/string_enum_built", || {
         GaugeStringEnum {
             endpoint: Endpoint::from(black_box(ENDPOINT)),
+            status: Status::Success,
+        }
+        .record(black_box(42.0))
+    });
+    bench_calls(&mut group, "gauge/string_enum_borrowed", || {
+        GaugeStringEnumRef {
+            endpoint: black_box(ENDPOINT),
             status: Status::Success,
         }
         .record(black_box(42.0))
@@ -240,6 +290,18 @@ fn generated_recording(c: &mut Criterion) {
     latencies.cursor = 0;
     bench_calls(&mut group, "histogram/5_tags_built", || {
         histogram_5_tags().record(latencies.next())
+    });
+    latencies.cursor = 0;
+    bench_calls(&mut group, "histogram/string_enum_borrowed", || {
+        HistogramStringEnumRef {
+            endpoint: black_box(ENDPOINT),
+            status: Status::Success,
+        }
+        .record(latencies.next())
+    });
+    latencies.cursor = 0;
+    bench_calls(&mut group, "histogram/5_tags_borrowed", || {
+        histogram_5_tags_borrowed().record(latencies.next())
     });
 
     group.finish();

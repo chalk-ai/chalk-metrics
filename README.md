@@ -140,8 +140,21 @@ fn main() {
         resolver_status: Status::Success,
         resolver_fqn: Some(Endpoint::from("my.resolver.fqn")),
     }.record(0.005);
+
+    // Borrowed form: every metric with tags also has a `<Metric>Ref<'a>` struct
+    // whose string tags are `&str`. It records the same series without
+    // allocating a `String` per call.
+    HttpRequestCountRef {
+        endpoint: "/api",
+        status: Status::Success,
+    }.record();
 }
 ```
+
+Use the owned struct when you already hold the tag values or build them once and
+reuse them. Use the `Ref` struct on hot paths where you have a `&str` and would
+otherwise build `Endpoint::from(..)` just to record: recording through it
+allocates nothing once the series exists. Both forms are the same series.
 
 ## Macro Reference
 
@@ -255,6 +268,12 @@ A binding module still registers the generated classes with Python. That
 registration is handled by the metric-binding layer.
 
 Generated metric structs expose `NAME`, `namespace()`, `export_pairs()`, and type-specific recording methods. Count metrics support `.record()` and `.record_value(i64)`. Gauge and histogram metrics support `.record(f64)`.
+
+Every metric with at least one tag also gets a borrowed struct named `<Metric>Ref<'a>` with the same field names, order, aliases, and visibility. String tags are `&'a str`, enum tags are the enum itself, and optional tags are `Option<..>` of those. It is `Copy` and has the same `record` / `record_value` methods. `metric.borrowed()` returns the `Ref` view of an owned struct. An owned struct and a `Ref` struct with equal values record into one series (their tag hashes are identical). Metrics without tags have no `Ref` struct.
+
+```rust
+HttpRequestCountRef { endpoint: "/api", status: Status::Success }.record();
+```
 
 ## Migrating From JSON Codegen
 
