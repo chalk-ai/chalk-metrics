@@ -789,17 +789,6 @@ fn expand_metric(
                 }
             }
 
-            /// Whether `pairs` hold the same keys and values as this struct, in
-            /// `export_pairs` order. Delegates to the borrowed form.
-            #[allow(dead_code)]
-            #[inline]
-            fn tags_match(
-                &self,
-                pairs: &[(&'static str, ::std::borrow::Cow<'static, str>)],
-            ) -> bool {
-                self.borrowed().tags_match(pairs)
-            }
-
             #delegating_record_method
         }
     } else {
@@ -822,7 +811,9 @@ fn expand_metric(
         );
         quote! {
             #[doc = #ref_doc]
-            #[derive(Debug, Clone, Copy, Hash)]
+            // No `Debug`: it costs compile time for every metric, and the
+            // owned struct already has it.
+            #[derive(Clone, Copy, Hash)]
             #vis struct #ref_ident<'a> {
                 #( #ref_fields )*
             }

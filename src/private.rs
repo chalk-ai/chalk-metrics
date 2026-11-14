@@ -123,7 +123,7 @@ pub trait MetricTag {
 /// Hashing must feed the hasher the same bytes as the owned tag's `Hash`, so an
 /// owned and a borrowed record with equal values share one series.
 #[doc(hidden)]
-pub trait TagRef: Copy + std::hash::Hash + std::fmt::Debug {
+pub trait TagRef: Copy + std::hash::Hash {
     /// The exported value without allocating.
     fn value_str(&self) -> &str;
 

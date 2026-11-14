@@ -216,17 +216,17 @@ mod tests {
             endpoint: Endpoint::from("/a"),
             status: Status::Success,
         };
-        assert!(count.tags_match(&count.clone().export_pairs()));
+        assert!(count.borrowed().tags_match(&count.clone().export_pairs()));
         let other_string = HttpRequestCount {
             endpoint: Endpoint::from("/b"),
             status: Status::Success,
         };
-        assert!(!count.tags_match(&other_string.export_pairs()));
+        assert!(!count.borrowed().tags_match(&other_string.export_pairs()));
         let other_enum = HttpRequestCount {
             endpoint: Endpoint::from("/a"),
             status: Status::Failure,
         };
-        assert!(!count.tags_match(&other_enum.export_pairs()));
+        assert!(!count.borrowed().tags_match(&other_enum.export_pairs()));
 
         // An optional tag present on one side only.
         let with_region = HttpActiveConnections {
@@ -237,10 +237,26 @@ mod tests {
             endpoint: Endpoint::from("/a"),
             region: None,
         };
-        assert!(with_region.tags_match(&with_region.export_pairs()));
-        assert!(without_region.tags_match(&without_region.export_pairs()));
-        assert!(!with_region.tags_match(&without_region.export_pairs()));
-        assert!(!without_region.tags_match(&with_region.export_pairs()));
+        assert!(
+            with_region
+                .borrowed()
+                .tags_match(&with_region.export_pairs())
+        );
+        assert!(
+            without_region
+                .borrowed()
+                .tags_match(&without_region.export_pairs())
+        );
+        assert!(
+            !with_region
+                .borrowed()
+                .tags_match(&without_region.export_pairs())
+        );
+        assert!(
+            !without_region
+                .borrowed()
+                .tags_match(&with_region.export_pairs())
+        );
 
         // Aliased tags compare under the alias, and a different value differs.
         let resolver = ResolverLatency {
@@ -248,17 +264,17 @@ mod tests {
             resolver_status: Status::Success,
             resolver_fqn: Some(Endpoint::from("fqn")),
         };
-        assert!(resolver.tags_match(&resolver.export_pairs()));
+        assert!(resolver.borrowed().tags_match(&resolver.export_pairs()));
         let other_fqn = ResolverLatency {
             resolver_fqn: Some(Endpoint::from("other")),
             ..resolver.clone()
         };
-        assert!(!resolver.tags_match(&other_fqn.export_pairs()));
+        assert!(!resolver.borrowed().tags_match(&other_fqn.export_pairs()));
 
         // The same values stored under a different key are not a match.
         let mut renamed = resolver.export_pairs();
         assert_eq!(renamed[2].0, "resolver_fqn");
         renamed[2].0 = "endpoint";
-        assert!(!resolver.tags_match(&renamed));
+        assert!(!resolver.borrowed().tags_match(&renamed));
     }
 }
