@@ -1,16 +1,13 @@
 name: Test
 
+# Runs on PRs only, including release-plz release PRs, so the code that gets
+# published is tested there. Branch protection on main requires these checks.
 on:
-  push:
-    branches: [main]
   pull_request:
-  schedule:
-    # Weekly, so new RustSec advisories surface without waiting for a PR.
-    - cron: "0 6 * * 1"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 permissions:
   contents: read

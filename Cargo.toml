@@ -3,7 +3,7 @@ members = [".", "chalk-metrics-macros"]
 
 [package]
 name = "chalk-metrics"
-version = "0.0.1"
+version = "0.0.4"
 edition = "2024"
 license = "Apache-2.0"
 description = "Fast composable metrics defined with Rust macros"
@@ -16,7 +16,7 @@ include = ["src/**", "README.md", "LICENSE", "CHANGELOG.md"]
 python-bindings = ["dep:pyo3"]
 
 [dependencies]
-chalk-metrics-macros = { path = "chalk-metrics-macros", version = "=0.0.1" }
+chalk-metrics-macros = { path = "chalk-metrics-macros", version = "=0.0.4" }
 parking_lot = "0.12"
 hashbrown = { version = "0.17", default-features = false, features = ["default-hasher", "inline-more"] }
 libc = "0.2"
