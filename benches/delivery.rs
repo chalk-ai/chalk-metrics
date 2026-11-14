@@ -28,7 +28,9 @@
 //! the same machine only. Export errors from the client's worker are logged to
 //! stderr, as is the total runtime; stdout carries only the JSON.
 //!
-//! Run with `cargo bench --bench delivery`; it takes about 25 seconds.
+//! Run with `cargo bench --bench delivery`; it takes about 25 seconds. It runs
+//! only under `cargo bench` (which passes `--bench`), and only when no name
+//! filter excludes `delivery`.
 
 use std::borrow::Cow;
 use std::net::UdpSocket;
@@ -544,7 +546,27 @@ fn wire_bytes(runtime: &Runtime, shape: &str, values: &[f64]) -> String {
     )
 }
 
+/// Whether this finite run was asked for. `cargo bench` passes `--bench` and
+/// `cargo test --benches` does not; a positional argument is a name filter, as
+/// in Criterion; `--list` only lists.
+fn selected(name: &str) -> bool {
+    let mut bench = false;
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--bench" => bench = true,
+            "--list" => return false,
+            filter if !filter.starts_with('-') && !name.contains(filter) => return false,
+            _ => {}
+        }
+    }
+    bench
+}
+
 fn main() {
+    if !selected("delivery") {
+        eprintln!("delivery: skipped (needs `--bench` and no filter excluding it)");
+        return;
+    }
     let start = Instant::now();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()

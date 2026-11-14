@@ -13,7 +13,8 @@
 //!    10,000 count series once. `steady` runs the pass over series that
 //!    already exist; `after_flush` runs it right after an untimed `flush()`.
 //!    The difference is the cost of re-registering every series.
-//! 3. Stall run (finite, not Criterion; skipped under `--list`): one thread
+//! 3. Stall run (finite, not Criterion; runs only under `cargo bench`, which
+//!    passes `--bench`, and ignores Criterion name filters): one thread
 //!    loops over 64 counter series, one per stripe, and times every call while
 //!    the main thread flushes a map holding 10,000 or 100,000 populated
 //!    histogram series. It prints one JSON line per size with the flush time
@@ -310,8 +311,10 @@ fn main() {
     benches();
     Criterion::default().configure_from_args().final_summary();
 
-    // Listing benches must not run a measurement.
-    if std::env::args().any(|arg| arg == "--list") {
+    // `cargo bench` passes `--bench`; `cargo test --benches` does not, and
+    // listing benches must not run a measurement either.
+    let args: Vec<String> = std::env::args().collect();
+    if !args.iter().any(|arg| arg == "--bench") || args.iter().any(|arg| arg == "--list") {
         return;
     }
     let latencies = latency_table();

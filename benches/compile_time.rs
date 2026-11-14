@@ -4,18 +4,25 @@
 //! directory, builds it with the cargo that is running this bench, and prints
 //! one JSON row per metric count and profile. Dependencies are compiled once,
 //! untimed, so each row is the time to rebuild only the crate holding the
-//! `define_metrics!` invocation. The fixture reuses this repository's lockfile
-//! and builds offline, so it needs no network once the repository itself builds.
+//! `define_metrics!` invocation. The one-metric row is the fixed cost of such a
+//! rebuild (cargo start-up, the tag definitions, linking), so the cost of the
+//! metrics themselves is the difference between rows. The fixture reuses this
+//! repository's lockfile and builds offline, so it needs no network once the
+//! repository itself builds.
+//!
+//! Runs only under `cargo bench` (which passes `--bench`), and only when no
+//! name filter excludes `compile_time`, so `cargo test --benches` and
+//! `cargo bench -- <some other bench>` do not start builds.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-const SIZES: [usize; 2] = [100, 1_000];
+const SIZES: [usize; 3] = [1, 100, 1_000];
 
 fn main() {
-    // Listing benches must not start builds.
-    if std::env::args().any(|arg| arg == "--list") {
+    if !selected("compile_time") {
+        eprintln!("compile_time: skipped (needs `--bench` and no filter excluding it)");
         return;
     }
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -52,6 +59,22 @@ fn main() {
         }
     }
     println!("[\n{}\n]", rows.join(",\n"));
+}
+
+/// Whether this finite run was asked for. `cargo bench` passes `--bench` and
+/// `cargo test --benches` does not; a positional argument is a name filter, as
+/// in Criterion; `--list` only lists.
+fn selected(name: &str) -> bool {
+    let mut bench = false;
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--bench" => bench = true,
+            "--list" => return false,
+            filter if !filter.starts_with('-') && !name.contains(filter) => return false,
+            _ => {}
+        }
+    }
+    bench
 }
 
 /// The bench executable lives in `<target>/<profile>/deps/`.

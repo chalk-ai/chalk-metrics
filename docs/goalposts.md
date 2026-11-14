@@ -23,7 +23,8 @@ cargo test --locked --test alloc_budget
 
 All of them together take about five minutes. `delivery` and `compile_time` are
 finite runs that print JSON rows; `flush` prints two JSON lines after its
-Criterion groups. Each bench file's header describes its cases.
+Criterion groups. The finite runs execute only under `cargo bench`, so
+`cargo test --benches` skips them. Each bench file's header describes its cases.
 
 ## Environment for the values below
 
@@ -142,9 +143,12 @@ observations each; StatsD uses Percentiles mode over UDP.
 ## Macro compile time
 
 `compile_time`: time to rebuild a crate whose only content is one
-`define_metrics!` group, with dependencies already built.
+`define_metrics!` group, with dependencies already built. The one-metric row is
+the fixed cost of a rebuild, so the metrics themselves cost the difference
+between rows.
 
 | Metrics defined | Dev build | Release build |
 |---:|---:|---:|
-| 100 | 0.4 s | 1.5 s |
+| 1 | 0.05 s | 0.12 s |
+| 100 | 0.35 s | 1.5 s |
 | 1,000 | 3.5 s | 15.2 s |
