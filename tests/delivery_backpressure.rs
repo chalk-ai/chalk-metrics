@@ -176,17 +176,20 @@ fn raw_queue_drains_early_once_a_quarter_full() {
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(exported.load(Ordering::SeqCst), 0);
 
-    // Half the queue in total: exported long before the regular flush.
+    // Half the queue in total: an early drain happens long before the regular
+    // flush. It may catch the queue while this loop is still filling it, so
+    // only the quarter-full level is guaranteed to have been exported early.
     for i in 0..8_092 {
         client.record_histogram("latency", &[], 1, Vec::new, i as f64);
     }
     assert!(
         wait_for(Duration::from_millis(500), || exported
             .load(Ordering::SeqCst)
-            == 8_192),
-        "exported {} of 8192 points",
+            >= 4_096),
+        "exported {} points early",
         exported.load(Ordering::SeqCst)
     );
     assert_eq!(client.dropped_raw_samples(), 0);
     client.shutdown();
+    assert_eq!(exported.load(Ordering::SeqCst), 8_192);
 }
