@@ -530,18 +530,12 @@ fn expand_metric(
                 }
             });
             match_pairs.push(quote! {
-                if let Some(ref value) = self.#field {
-                    let Some((key, stored)) = pairs.get(index) else {
-                        return false;
-                    };
-                    let stored: &str = stored;
-                    if *key != #export_key
-                        || stored != <#ty as chalk_metrics::__private::MetricTag>::value_str(value)
-                    {
-                        return false;
-                    }
-                    index += 1;
-                }
+                (
+                    #export_key,
+                    self.#field
+                        .as_ref()
+                        .map(<#ty as chalk_metrics::__private::MetricTag>::value_str),
+                ),
             });
         } else {
             fields.push(quote! { pub #field: #ty, });
@@ -553,20 +547,24 @@ fn expand_metric(
                 ));
             });
             match_pairs.push(quote! {
-                let Some((key, stored)) = pairs.get(index) else {
-                    return false;
-                };
-                let stored: &str = stored;
-                if *key != #export_key
-                    || stored != <#ty as chalk_metrics::__private::MetricTag>::value_str(&self.#field)
-                {
-                    return false;
-                }
-                index += 1;
+                (
+                    #export_key,
+                    ::std::option::Option::Some(
+                        <#ty as chalk_metrics::__private::MetricTag>::value_str(&self.#field),
+                    ),
+                ),
             });
         }
         constructor_fields.push(quote! { #field, });
     }
+
+    // One shared helper compares the tags, so each metric only builds a small
+    // array. Metrics without tags need no call at all.
+    let tags_match_body = if tags.is_empty() {
+        quote! { pairs.is_empty() }
+    } else {
+        quote! { chalk_metrics::__private::tags_match(pairs, &[ #( #match_pairs )* ]) }
+    };
 
     // Metrics without tags hash no fields, so their hash is a constant. It stays
     // the std hasher's empty-input value, which `client::record_*` callers using
@@ -704,9 +702,7 @@ fn expand_metric(
                 &self,
                 pairs: &[(&'static str, ::std::borrow::Cow<'static, str>)],
             ) -> bool {
-                let mut index = 0usize;
-                #( #match_pairs )*
-                index == pairs.len()
+                #tags_match_body
             }
 
             #[inline]

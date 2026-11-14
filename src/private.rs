@@ -5,10 +5,67 @@ use std::hash::BuildHasher;
 const TAG_HASH_SEED: u64 = 0x6368_616c_6b5f_6d74;
 
 /// Hasher used by generated metrics to fingerprint their tag values.
+///
+/// A wrapper whose methods are compiled once, here, rather than inlined into
+/// every generated metric: inlining them made crates that define many metrics
+/// much slower to compile in release builds.
 #[doc(hidden)]
-#[inline]
-pub fn tag_hasher() -> impl std::hash::Hasher {
-    foldhash::quality::FixedState::with_seed(TAG_HASH_SEED).build_hasher()
+pub struct TagHasher(foldhash::quality::FoldHasher<'static>);
+
+impl std::hash::Hasher for TagHasher {
+    #[inline(never)]
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.write(bytes);
+    }
+
+    #[inline(never)]
+    fn write_u8(&mut self, value: u8) {
+        self.0.write_u8(value);
+    }
+
+    #[inline(never)]
+    fn write_u64(&mut self, value: u64) {
+        self.0.write_u64(value);
+    }
+
+    #[inline(never)]
+    fn write_usize(&mut self, value: usize) {
+        self.0.write_usize(value);
+    }
+
+    #[inline(never)]
+    fn finish(&self) -> u64 {
+        self.0.finish()
+    }
+}
+
+/// A fresh [`TagHasher`] with the fixed seed.
+#[doc(hidden)]
+#[inline(never)]
+pub fn tag_hasher() -> TagHasher {
+    TagHasher(foldhash::quality::FixedState::with_seed(TAG_HASH_SEED).build_hasher())
+}
+
+/// Whether `stored` (the tags of an existing series) holds exactly the keys and
+/// values in `mine`, in order, skipping entries of `mine` whose value is `None`
+/// (an optional tag that is not set). One shared function, so generated metrics
+/// only build the small `mine` array.
+#[doc(hidden)]
+pub fn tags_match(
+    stored: &[(&'static str, Cow<'static, str>)],
+    mine: &[(&'static str, Option<&str>)],
+) -> bool {
+    let mut stored = stored.iter();
+    for (key, value) in mine {
+        let Some(value) = value else {
+            continue;
+        };
+        match stored.next() {
+            Some((stored_key, stored_value)) if stored_key == key && stored_value == value => {}
+            _ => return false,
+        }
+    }
+    stored.next().is_none()
 }
 
 /// A content-based name fingerprint computed at compile time by generated metrics.
