@@ -54,8 +54,12 @@ pub(crate) fn spawn_flush_worker(
                     time::interval((raw_sample_flush_interval / 10).max(Duration::from_millis(1)));
                 early_interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
                 early_interval.tick().await;
-                let mut aggregate_errors = ErrorLimiter::default();
-                let mut raw_errors = ErrorLimiter::default();
+                // One limiter per exporter and kind, so one exporter's errors
+                // never hide another's.
+                let mut aggregate_errors: Vec<ErrorLimiter> =
+                    exporters.iter().map(|_| ErrorLimiter::default()).collect();
+                let mut raw_errors: Vec<ErrorLimiter> =
+                    exporters.iter().map(|_| ErrorLimiter::default()).collect();
 
                 loop {
                     tokio::select! {
@@ -68,6 +72,9 @@ pub(crate) fn spawn_flush_worker(
                         _ = early_interval.tick(), if raw_receiver.is_some() => {
                             if raw_queue_is_quarter_full(&raw_receiver) {
                                 drain_raw_and_export(&mut raw_receiver, &exporters, &mut raw_errors).await;
+                                // Count the next regular flush from now, so it does
+                                // not follow at once with a small leftover batch.
+                                raw_interval.reset();
                             }
                         }
                         _ = shutdown.notified() => {
@@ -75,6 +82,13 @@ pub(crate) fn spawn_flush_worker(
                             if let Some(receiver) = &mut raw_receiver { receiver.close(); }
                             flush_and_export(&aggregator, &exporters, &mut aggregate_errors).await;
                             drain_raw_and_export(&mut raw_receiver, &exporters, &mut raw_errors).await;
+                            // Nothing prints after this: report what was held back.
+                            for limiter in &mut aggregate_errors {
+                                limiter.finish("export");
+                            }
+                            for limiter in &mut raw_errors {
+                                limiter.finish("export_raw_points");
+                            }
                             break;
                         }
                     }
@@ -89,6 +103,7 @@ pub(crate) fn spawn_flush_worker(
 struct ErrorLimiter {
     last_print: Option<Instant>,
     suppressed: u64,
+    last_suppressed: Option<String>,
 }
 
 impl ErrorLimiter {
@@ -99,6 +114,7 @@ impl ErrorLimiter {
             .is_some_and(|last| now.duration_since(last) < Duration::from_secs(1))
         {
             self.suppressed += 1;
+            self.last_suppressed = Some(error.to_string());
             return;
         }
         if self.suppressed > 0 {
@@ -111,6 +127,18 @@ impl ErrorLimiter {
         }
         self.last_print = Some(now);
         self.suppressed = 0;
+        self.last_suppressed = None;
+    }
+
+    /// Prints the most recent suppressed error, if any, with the count held back.
+    fn finish(&mut self, kind: &str) {
+        if let Some(error) = self.last_suppressed.take() {
+            eprintln!(
+                "chalk-metrics: {kind} error: {error} ({} errors since the last report)",
+                self.suppressed
+            );
+            self.suppressed = 0;
+        }
     }
 }
 
@@ -123,13 +151,13 @@ fn raw_queue_is_quarter_full(raw_receiver: &Option<mpsc::Receiver<RawDistributio
 async fn flush_and_export(
     aggregator: &StripedAggMap,
     exporters: &[ConfiguredExporter],
-    errors: &mut ErrorLimiter,
+    errors: &mut [ErrorLimiter],
 ) {
     let metrics = aggregator.flush();
     if metrics.is_empty() {
         return;
     }
-    for configured in exporters {
+    for (configured, errors) in exporters.iter().zip(errors) {
         // Avoid cloning sketches. Only raw-only consumers need a filtered batch.
         let filtered;
         let batch = if configured.input.wants_sketch() {
@@ -164,7 +192,7 @@ async fn flush_and_export(
 async fn drain_raw_and_export(
     raw_receiver: &mut Option<mpsc::Receiver<RawDistributionPoint>>,
     exporters: &[ConfiguredExporter],
-    errors: &mut ErrorLimiter,
+    errors: &mut [ErrorLimiter],
 ) {
     let Some(receiver) = raw_receiver else {
         return;
@@ -184,7 +212,11 @@ async fn drain_raw_and_export(
         return;
     }
 
-    for configured in exporters.iter().filter(|e| e.input.wants_raw()) {
+    for (configured, errors) in exporters
+        .iter()
+        .zip(errors)
+        .filter(|(configured, _)| configured.input.wants_raw())
+    {
         if let Err(e) = configured.exporter.export_raw_points(&points).await {
             errors.report("export_raw_points", &e);
         }

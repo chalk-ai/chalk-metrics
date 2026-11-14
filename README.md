@@ -402,8 +402,9 @@ chalk_metrics::client::builder()
 Counters, gauges, and sketches are exported on `flush_interval` (default 10
 seconds). Original observations use a separate `raw_sample_flush_interval`
 (default 100 milliseconds, must be positive). Raw observations are exported
-every raw flush interval, or sooner once the queue is a quarter full (checked
-ten times per interval, at least every millisecond). Both timers skip their
+one raw flush interval after the previous export, or sooner once the queue is a
+quarter full (checked ten times per interval, but no more often than once per
+millisecond). Both timers skip their
 immediate startup tick. Allow up to the relevant interval plus scheduling and exporter
 execution time. Slow exporters can extend either latency because calls are
 sequential, even with multiple runtime threads. A custom `Both` exporter receives

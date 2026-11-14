@@ -85,9 +85,10 @@ impl MetricsClientBuilder {
 
     /// Set the raw-observation export interval (default: 100 milliseconds),
     /// independently of the counter, gauge, and sketch flush interval.
-    /// Queued observations are exported every interval, or sooner once the
-    /// queue is a quarter full (checked every tenth of the interval, at least
-    /// 1 millisecond). Sequential or slow exporters can extend this latency.
+    /// Queued observations are exported one interval after the previous
+    /// export, or sooner once the queue is a quarter full (checked every tenth
+    /// of the interval, but no more often than once per millisecond).
+    /// Sequential or slow exporters can extend this latency.
     ///
     /// # Panics
     /// Panics if the interval is zero.
