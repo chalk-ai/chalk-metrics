@@ -1,9 +1,12 @@
 [package]
 name = "chalk-metrics-macros"
-version = "0.0.0"
+version = "0.0.1"
 edition = "2024"
 license = "Apache-2.0"
 description = "Proc macros for chalk-metrics"
+repository = "https://github.com/chalk-ai/chalk-metrics"
+rust-version = "1.88"
+include = ["src/**", "LICENSE"]
 
 [lib]
 proc-macro = true
@@ -11,4 +14,4 @@ proc-macro = true
 [dependencies]
 proc-macro2 = "1.0"
 quote = "1.0"
-syn = { version = "2.0", features = ["full"] }
+syn = { version = "3", features = ["full"] }

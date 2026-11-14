@@ -120,6 +120,10 @@ pub(crate) struct ConfiguredExporter {
 /// The trait is async to support network-bound exporters. The flush worker
 /// calls registered exporters sequentially; increasing runtime threads does not
 /// change this ordering.
+///
+/// Exporters run on the worker's tokio runtime. chalk-metrics does not enable
+/// tokio's `net` feature; an exporter that uses `tokio::net` must enable it in
+/// its own crate, which also enables the runtime's I/O driver.
 #[async_trait::async_trait]
 #[allow(
     clippy::double_must_use,

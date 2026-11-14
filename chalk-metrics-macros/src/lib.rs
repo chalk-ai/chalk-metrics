@@ -116,7 +116,7 @@ fn expand_tags(input: TagsInput, python_bindings: bool) -> TokenStream2 {
 
         if let Some(values) = tag.values {
             let python_class = if python_bindings {
-                quote! { #[::pyo3::pyclass(frozen, eq, eq_int, hash)] }
+                quote! { #[::pyo3::pyclass(frozen, eq, eq_int, hash, from_py_object)] }
             } else {
                 quote! {}
             };
@@ -158,7 +158,7 @@ fn expand_tags(input: TagsInput, python_bindings: bool) -> TokenStream2 {
             }
         } else {
             let python_class = if python_bindings {
-                quote! { #[::pyo3::pyclass(frozen, eq, hash)] }
+                quote! { #[::pyo3::pyclass(frozen, eq, hash, from_py_object)] }
             } else {
                 quote! {}
             };
