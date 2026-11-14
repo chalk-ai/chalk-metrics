@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/chalk-ai/chalk-metrics/compare/v0.0.0...v0.0.4) - 2026-11-14
+
+### Fixed
+
+- add DS_store to gitignore
+
+### Other
+
+- run on PRs only and rely on required checks for releases
+- test before publishing; log macros-only changes
+- Switch releases to release-plz
+- pick the highest release, require green main, abort cleanly
+- Add make release, ported from chalk's release script
+- Address review: publish gate, CI triggers, docs, macros LICENSE
+- Upgrade pyo3 to 0.30 and correct MSRV to 1.88
+- Update dependencies, trim features, and fix crate packaging
+- Document compatibility revisions and three-version benchmark evidence
+- Measure distribution payload, loss, latency, and CPU against both baselines
+- Replace obsolete mean-based benchmark claims with measured adoption results
+- Verify adoption with production packets, shutdown tests, and benchmark evidence
+- Drain raw observations independently and continue after datagram failures
+- Harden UDP and UDS transport and bound raw sample queues
+- Pack DogStatsD distribution values without losing observations
+- Route distribution samples and sketches by exporter requirements
+- Fix striped aggregation across growth and add comparable benchmarks
+- gating changes
+- update metrics macro
+- make python-bindings a feature
+- generate python classes
+- Update Cargo.toml
+- match on sending channel
+- share buffer
+- don't write aggregated metrics when raw metrics are present
+- clean up buffer creation
+- remove extra test
+- tests
+- export RawDistributionPoints
+- add plumbing (channel + new type) for distribution points
+- create RawDistributionPoint type
+- adjust to use rust macros instead of JSON
+
 - Releases are managed by release-plz: merging its release PR publishes both crates
   to crates.io and tags `v<version>`. Both crates move to 0.0.4, past the existing
   v0.0.1-v0.0.3 tags that were never published.
