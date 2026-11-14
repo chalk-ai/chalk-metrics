@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::cell::RefCell;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 #[cfg(unix)]
@@ -250,7 +249,7 @@ impl StatsdExporter {
     /// Lines are produced lazily, so datagrams go out while later metrics are
     /// still being formatted.
     fn send_metrics(&self, metrics: &[FlushedMetric]) -> Result<(), ExportError> {
-        let rejected = RefCell::new(None);
+        let mut rejected = None;
         let lines = metrics.iter().flat_map(|metric| {
             let name = self.full_name(metric.namespace, metric.metric_name);
             let tags = self.format_tags(&metric.tags.pairs);
@@ -260,7 +259,7 @@ impl StatsdExporter {
                 FlushedValue::Gauge(value) => Lines::One(Some(format!("{name}:{value}|g{tags}"))),
                 FlushedValue::Histogram(sketch) => match &self.histogram_mode {
                     HistogramExportMode::Distribution => {
-                        rejected.borrow_mut().get_or_insert_with(|| ExportError::new(
+                        rejected.get_or_insert_with(|| ExportError::new(
                             "Distribution requires original samples; use MetricsClient or export_raw_points",
                         ));
                         Lines::One(None)
@@ -283,7 +282,7 @@ impl StatsdExporter {
         });
 
         let result = self.send_lines(lines);
-        match rejected.into_inner() {
+        match rejected {
             Some(error) => Err(error),
             None => result,
         }
