@@ -424,8 +424,17 @@ chalk_metrics::client::builder()
     .initial_error(0.001)            // histogram starting relative error
     .raw_sample_queue_capacity(16_384) // queued original observations
     .raw_sample_flush_interval(Duration::from_millis(100))
+    .retain_idle_series(0)           // flushes an idle series is kept (default: 0)
     .init();                         // or .try_init() for Result
 ```
+
+By default every flush removes count and histogram series from the aggregation
+map, so the first record of a series after a flush rebuilds its cached tags.
+`retain_idle_series(n)` with `n > 0` keeps a series, tags included, until it
+has gone `n` consecutive flushes without a record. Retained series that were not
+recorded since the previous flush export nothing; a count recorded to a net zero
+still exports `0`. Gauges always persist. Idle series cost memory until they are
+evicted, so keep `n` small when tag cardinality is high.
 
 `initial_error` is the relative error a histogram starts with, not a bound that
 holds forever. When a histogram needs more than `max_buckets` buckets, adjacent

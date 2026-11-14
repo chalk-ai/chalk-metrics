@@ -67,6 +67,7 @@ Guidance for coding agents working in this repository.
 - Tag types implement the hidden `MetricTag` trait, whose `type Ref<'a>` is `&'a str` (string tags) or `Self` (enum tags); `TagRef` is the borrowed-value trait (`value_str`, `export_value`). The owned struct records through `borrowed()`, so the `Ref` struct's derived `Hash` is the only tag hash and both forms are one series by construction
 
 ### Flush Behavior
-- Counts and histograms are drained from the map on flush
+- Counts and histograms are drained from the map on flush (and raw-distribution tag-cache entries removed)
+- `retain_idle_series(n)` (default 0 = off) keeps them for `n` consecutive flushes without a record; each map entry carries `touched` / `idle_flushes`, and only touched entries are emitted (a touched count of net zero still emits `Count(0)`)
 - Gauges persist across flushes
 - Tags data is `Arc`-shared — flush does a cheap pointer bump, no string copies

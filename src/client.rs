@@ -53,6 +53,7 @@ pub struct MetricsClientBuilder {
     initial_error: f64,
     aggregate_distr_metrics: bool,
     raw_sample_queue_capacity: usize,
+    retain_idle_series: u32,
 }
 
 impl MetricsClientBuilder {
@@ -66,6 +67,7 @@ impl MetricsClientBuilder {
             initial_error: 0.001,
             aggregate_distr_metrics: true,
             raw_sample_queue_capacity: RAW_POINT_CHANNEL_CAPACITY,
+            retain_idle_series: 0,
         }
     }
 
@@ -151,6 +153,21 @@ impl MetricsClientBuilder {
         self
     }
 
+    /// Keep count, histogram and raw-distribution series in the aggregation map
+    /// for this many consecutive flushes without a record before removing them
+    /// (default: 0, which removes them at every flush as before).
+    ///
+    /// A retained series keeps its cached tags, so recording it again after a
+    /// flush skips tag construction. Only series recorded since the previous
+    /// flush are exported: a retained series with no new record emits nothing,
+    /// and a count recorded to a net zero still exports `Count(0)`. Gauges are
+    /// always retained and are unaffected. Memory for idle series is held until
+    /// they are evicted, so keep this small for high-cardinality tags.
+    pub fn retain_idle_series(mut self, flushes: u32) -> Self {
+        self.retain_idle_series = flushes;
+        self
+    }
+
     /// Initialize the global metrics client singleton.
     ///
     /// # Panics
@@ -206,7 +223,8 @@ impl MetricsClientBuilder {
         };
         let aggregator = Arc::new(
             StripedAggMap::new(self.max_buckets, self.initial_error, raw_sender)
-                .with_histogram_aggregation(wants_sketch),
+                .with_histogram_aggregation(wants_sketch)
+                .with_retained_idle_flushes(self.retain_idle_series),
         );
         let shutdown_notify = Arc::new(Notify::new());
 
