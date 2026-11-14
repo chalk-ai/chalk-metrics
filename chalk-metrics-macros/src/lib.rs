@@ -150,7 +150,23 @@ fn expand_tags(input: TagsInput, python_bindings: bool) -> TokenStream2 {
 
                 impl chalk_metrics::__private::MetricTag for #ident {
                     const EXPORT_NAME: &'static str = #export_name;
+                    type Ref<'a> = Self;
 
+                    fn export_value(&self) -> ::std::borrow::Cow<'static, str> {
+                        ::std::borrow::Cow::Borrowed(self.as_str())
+                    }
+
+                    fn value_str(&self) -> &str {
+                        self.as_str()
+                    }
+
+                    #[inline]
+                    fn tag_ref(&self) -> Self {
+                        *self
+                    }
+                }
+
+                impl chalk_metrics::__private::TagRef for #ident {
                     fn export_value(&self) -> ::std::borrow::Cow<'static, str> {
                         ::std::borrow::Cow::Borrowed(self.as_str())
                     }
@@ -219,12 +235,18 @@ fn expand_tags(input: TagsInput, python_bindings: bool) -> TokenStream2 {
 
                 impl chalk_metrics::__private::MetricTag for #ident {
                     const EXPORT_NAME: &'static str = #export_name;
+                    type Ref<'a> = &'a str;
 
                     fn export_value(&self) -> ::std::borrow::Cow<'static, str> {
                         ::std::borrow::Cow::Owned(self.to_string())
                     }
 
                     fn value_str(&self) -> &str {
+                        &self.0
+                    }
+
+                    #[inline]
+                    fn tag_ref(&self) -> &str {
                         &self.0
                     }
                 }
@@ -502,7 +524,12 @@ fn expand_metric(
     };
     let doc = format!("{} ({})", description.value(), metric_type);
 
+    let ref_ident = format_ident!("{}Ref", ident);
+    let tagged = !tags.is_empty();
+
     let mut fields = Vec::new();
+    let mut ref_fields = Vec::new();
+    let mut borrow_fields = Vec::new();
     let mut constructor_args = Vec::new();
     let mut constructor_fields = Vec::new();
     let mut export_pairs = Vec::new();
@@ -520,12 +547,20 @@ fn expand_metric(
 
         if tag.optional {
             fields.push(quote! { pub #field: Option<#ty>, });
+            ref_fields.push(quote! {
+                pub #field: Option<<#ty as chalk_metrics::__private::MetricTag>::Ref<'a>>,
+            });
+            borrow_fields.push(quote! {
+                #field: self.#field
+                    .as_ref()
+                    .map(<#ty as chalk_metrics::__private::MetricTag>::tag_ref),
+            });
             constructor_args.push(quote! { #field: Option<#ty> });
             export_pairs.push(quote! {
                 if let Some(ref value) = self.#field {
                     pairs.push((
                         #export_key,
-                        <#ty as chalk_metrics::__private::MetricTag>::export_value(value),
+                        chalk_metrics::__private::TagRef::export_value(value),
                     ));
                 }
             });
@@ -534,24 +569,30 @@ fn expand_metric(
                     #export_key,
                     self.#field
                         .as_ref()
-                        .map(<#ty as chalk_metrics::__private::MetricTag>::value_str),
+                        .map(chalk_metrics::__private::TagRef::value_str),
                 ),
             });
         } else {
             fields.push(quote! { pub #field: #ty, });
+            ref_fields.push(quote! {
+                pub #field: <#ty as chalk_metrics::__private::MetricTag>::Ref<'a>,
+            });
+            borrow_fields.push(quote! {
+                #field: <#ty as chalk_metrics::__private::MetricTag>::tag_ref(&self.#field),
+            });
             constructor_args.push(quote! { #field: #ty });
             export_pairs.push(quote! {
                 pairs.push((
                     #export_key,
-                    <#ty as chalk_metrics::__private::MetricTag>::export_value(&self.#field),
+                    chalk_metrics::__private::TagRef::export_value(&self.#field),
                 ));
             });
             match_pairs.push(quote! {
                 (
                     #export_key,
-                    ::std::option::Option::Some(
-                        <#ty as chalk_metrics::__private::MetricTag>::value_str(&self.#field),
-                    ),
+                    ::std::option::Option::Some(chalk_metrics::__private::TagRef::value_str(
+                        &self.#field,
+                    )),
                 ),
             });
         }
@@ -575,6 +616,8 @@ fn expand_metric(
         quote! { chalk_metrics::__private::tag_hasher() }
     };
 
+    // The recording logic. Tagged metrics put it on the borrowed `Ref` struct and
+    // the owned struct delegates; untagged metrics keep it on the owned struct.
     let record_method = match metric.kind {
         MetricKind::Count => quote! {
             /// Record a count increment of 1.
@@ -586,8 +629,8 @@ fn expand_metric(
             pub fn record_value(&self, value: i64) {
                 let hash = self.tags_hash();
                 chalk_metrics::client::record_count_named(
-                    Self::METRIC_NAME,
-                    Self::namespace(),
+                    #ident::METRIC_NAME,
+                    #ident::namespace(),
                     hash,
                     || self.export_pairs(),
                     |pairs| self.tags_match(pairs),
@@ -600,8 +643,8 @@ fn expand_metric(
             pub fn record(&self, value: f64) {
                 let hash = self.tags_hash();
                 chalk_metrics::client::record_gauge_named(
-                    Self::METRIC_NAME,
-                    Self::namespace(),
+                    #ident::METRIC_NAME,
+                    #ident::namespace(),
                     hash,
                     || self.export_pairs(),
                     |pairs| self.tags_match(pairs),
@@ -614,13 +657,39 @@ fn expand_metric(
             pub fn record(&self, value: f64) {
                 let hash = self.tags_hash();
                 chalk_metrics::client::record_histogram_named(
-                    Self::METRIC_NAME,
-                    Self::namespace(),
+                    #ident::METRIC_NAME,
+                    #ident::namespace(),
                     hash,
                     || self.export_pairs(),
                     |pairs| self.tags_match(pairs),
                     value,
                 );
+            }
+        },
+    };
+
+    let delegating_record_method = match metric.kind {
+        MetricKind::Count => quote! {
+            /// Record a count increment of 1.
+            pub fn record(&self) {
+                self.borrowed().record();
+            }
+
+            /// Record a count delta.
+            pub fn record_value(&self, value: i64) {
+                self.borrowed().record_value(value);
+            }
+        },
+        MetricKind::Gauge => quote! {
+            /// Record a gauge value.
+            pub fn record(&self, value: f64) {
+                self.borrowed().record(value);
+            }
+        },
+        MetricKind::Histogram => quote! {
+            /// Record a histogram observation.
+            pub fn record(&self, value: f64) {
+                self.borrowed().record(value);
             }
         },
     };
@@ -667,6 +736,114 @@ fn expand_metric(
         quote! {}
     };
 
+    // The tag-dependent helpers, shared by the owned struct (untagged
+    // metrics) and the `Ref` struct (tagged metrics).
+    let helpers = quote! {
+        /// Whether `pairs` (the tags stored for an existing series) hold the
+        /// same keys and values as this struct, in `export_pairs` order.
+        /// Allocation free.
+        #[inline]
+        fn tags_match(
+            &self,
+            pairs: &[(&'static str, ::std::borrow::Cow<'static, str>)],
+        ) -> bool {
+            #tags_match_body
+        }
+
+        #[inline]
+        fn tags_hash(&self) -> u64 {
+            use ::std::hash::{Hash, Hasher};
+            let mut hasher = #hasher;
+            self.hash(&mut hasher);
+            hasher.finish()
+        }
+    };
+
+    let identity = quote! {
+        /// The metric name without namespace segments.
+        pub const NAME: &'static str = #name;
+
+        const METRIC_NAME: chalk_metrics::__private::MetricName =
+            chalk_metrics::__private::MetricName::new(Self::NAME);
+
+        /// The namespace path. Empty for top-level metrics.
+        #[inline]
+        pub fn namespace() -> &'static [&'static str] {
+            <#namespace as chalk_metrics::__private::MetricNamespace>::path()
+        }
+    };
+
+    let owned_methods = if tagged {
+        quote! {
+            /// Returns `(export_name, value)` pairs for all set tags.
+            pub fn export_pairs(&self) -> Vec<(&'static str, ::std::borrow::Cow<'static, str>)> {
+                self.borrowed().export_pairs()
+            }
+
+            /// A borrowed view of these tags that records the same series
+            /// without allocating.
+            #[inline]
+            pub fn borrowed(&self) -> #ref_ident<'_> {
+                #ref_ident {
+                    #( #borrow_fields )*
+                }
+            }
+
+            /// Whether `pairs` hold the same keys and values as this struct, in
+            /// `export_pairs` order. Delegates to the borrowed form.
+            #[allow(dead_code)]
+            #[inline]
+            fn tags_match(
+                &self,
+                pairs: &[(&'static str, ::std::borrow::Cow<'static, str>)],
+            ) -> bool {
+                self.borrowed().tags_match(pairs)
+            }
+
+            #delegating_record_method
+        }
+    } else {
+        quote! {
+            /// Returns `(export_name, value)` pairs for all set tags.
+            pub fn export_pairs(&self) -> Vec<(&'static str, ::std::borrow::Cow<'static, str>)> {
+                Vec::new()
+            }
+
+            #helpers
+
+            #record_method
+        }
+    };
+
+    let ref_struct = if tagged {
+        let ref_doc = format!(
+            "Borrowed form of [`{ident}`]: string tags are `&str`, so recording allocates \
+             nothing. It records the same series as the owned struct."
+        );
+        quote! {
+            #[doc = #ref_doc]
+            #[derive(Debug, Clone, Copy, Hash)]
+            #vis struct #ref_ident<'a> {
+                #( #ref_fields )*
+            }
+
+            impl<'a> #ref_ident<'a> {
+                /// Returns `(export_name, value)` pairs for all set tags.
+                fn export_pairs(&self) -> Vec<(&'static str, ::std::borrow::Cow<'static, str>)> {
+                    let mut pairs = Vec::new();
+                    #( #export_pairs )*
+                    pairs
+                }
+
+                #helpers
+
+                #record_method
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     Ok(quote! {
         #[doc = #doc]
         #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -675,46 +852,12 @@ fn expand_metric(
         }
 
         impl #ident {
-            /// The metric name without namespace segments.
-            pub const NAME: &'static str = #name;
+            #identity
 
-            const METRIC_NAME: chalk_metrics::__private::MetricName =
-                chalk_metrics::__private::MetricName::new(Self::NAME);
-
-            /// The namespace path. Empty for top-level metrics.
-            #[inline]
-            pub fn namespace() -> &'static [&'static str] {
-                <#namespace as chalk_metrics::__private::MetricNamespace>::path()
-            }
-
-            /// Returns `(export_name, value)` pairs for all set tags.
-            pub fn export_pairs(&self) -> Vec<(&'static str, ::std::borrow::Cow<'static, str>)> {
-                let mut pairs = Vec::new();
-                #( #export_pairs )*
-                pairs
-            }
-
-            /// Whether `pairs` (the tags stored for an existing series) hold the
-            /// same keys and values as this struct, in `export_pairs` order.
-            /// Allocation free.
-            #[inline]
-            fn tags_match(
-                &self,
-                pairs: &[(&'static str, ::std::borrow::Cow<'static, str>)],
-            ) -> bool {
-                #tags_match_body
-            }
-
-            #[inline]
-            fn tags_hash(&self) -> u64 {
-                use ::std::hash::{Hash, Hasher};
-                let mut hasher = #hasher;
-                self.hash(&mut hasher);
-                hasher.finish()
-            }
-
-            #record_method
+            #owned_methods
         }
+
+        #ref_struct
 
         #python_wrapper
     })

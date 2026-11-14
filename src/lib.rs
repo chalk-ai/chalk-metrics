@@ -49,8 +49,20 @@
 //!         endpoint: Endpoint::from("/api"),
 //!         status: Status::Success,
 //!     }.record();  // count: no arg = increment by 1
+//!
+//!     // Borrowed form: string tags are `&str`, so recording allocates nothing.
+//!     HttpRequestCountRef {
+//!         endpoint: "/api",
+//!         status: Status::Success,
+//!     }.record();
 //! }
 //! ```
+//!
+//! Every metric with tags has an owned struct (`HttpRequestCount`, string tags
+//! are `Endpoint(String)`) and a borrowed `<Metric>Ref<'a>` struct
+//! (`HttpRequestCountRef`, string tags are `&str`). Both record the same
+//! series; `metric.borrowed()` converts the owned form. Prefer the `Ref` form
+//! when you only hold a `&str`.
 
 extern crate self as chalk_metrics;
 

@@ -4,7 +4,8 @@
 //! CI. The budgets below are what the library does today: a ratchet that makes
 //! any change to the count visible in review, not a target. The one allocation
 //! per `String` tag in the "built" cases is the caller constructing the tag
-//! (`Endpoint::from("/api")`), which this crate's API requires.
+//! (`Endpoint::from("/api")`), which the owned structs require. The "borrowed"
+//! cases use the `<Metric>Ref` structs, which take `&str` and allocate nothing.
 //!
 //! Allocations are counted per thread so the client's background worker thread
 //! cannot pollute the count. Everything runs in one test because the global
@@ -98,6 +99,16 @@ const TENANT: &str = "tenant-0042";
 /// Constant, so sketch bucket growth cannot add allocations.
 const LATENCY: f64 = 0.02;
 
+fn count_5_tags_borrowed() -> Count5TagsRef<'static> {
+    Count5TagsRef {
+        endpoint: black_box(ENDPOINT),
+        region: black_box(REGION),
+        tenant: black_box(TENANT),
+        status: Status::Success,
+        method: Method::Post,
+    }
+}
+
 fn count_5_tags() -> Count5Tags {
     Count5Tags {
         endpoint: Endpoint::from(black_box(ENDPOINT)),
@@ -141,6 +152,14 @@ fn generated_recording_allocation_budget() {
         .record()
     });
 
+    assert_allocations("uninitialized count, string + enum borrowed", 0, || {
+        CountStringEnumRef {
+            endpoint: black_box(ENDPOINT),
+            status: Status::Success,
+        }
+        .record()
+    });
+
     client::builder()
         .flush_interval(Duration::from_secs(3600))
         .init();
@@ -174,10 +193,27 @@ fn generated_recording_allocation_budget() {
         .record()
     });
     let prebuilt_5_tags = count_5_tags();
+    assert_allocations("count, string + enum borrowed", 0, || {
+        CountStringEnumRef {
+            endpoint: black_box(ENDPOINT),
+            status: Status::Success,
+        }
+        .record()
+    });
     assert_allocations("count, 5 tags prebuilt", 0, || {
         black_box(&prebuilt_5_tags).record()
     });
     assert_allocations("count, 5 tags built", 3, || count_5_tags().record());
+    assert_allocations("count, 5 tags borrowed", 0, || {
+        count_5_tags_borrowed().record()
+    });
+    assert_allocations("gauge, string + enum borrowed", 0, || {
+        GaugeStringEnumRef {
+            endpoint: black_box(ENDPOINT),
+            status: Status::Success,
+        }
+        .record(black_box(42.0))
+    });
     assert_allocations("gauge, string + enum built", 1, || {
         GaugeStringEnum {
             endpoint: Endpoint::from(black_box(ENDPOINT)),
@@ -191,6 +227,13 @@ fn generated_recording_allocation_budget() {
     assert_allocations("histogram, string + enum built", 1, || {
         HistogramStringEnum {
             endpoint: Endpoint::from(black_box(ENDPOINT)),
+            status: Status::Success,
+        }
+        .record(black_box(LATENCY))
+    });
+    assert_allocations("histogram, string + enum borrowed", 0, || {
+        HistogramStringEnumRef {
+            endpoint: black_box(ENDPOINT),
             status: Status::Success,
         }
         .record(black_box(LATENCY))
