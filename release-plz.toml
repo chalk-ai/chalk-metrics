@@ -7,6 +7,8 @@ release_always = false
 name = "chalk-metrics"
 version_group = "chalk-metrics"
 git_tag_name = "v{{ version }}"
+# The macros crate has no changelog; list its commits here.
+changelog_include = ["chalk-metrics-macros"]
 
 # Published with chalk-metrics at the same version; it gets no tag, GitHub
 # release or changelog of its own.

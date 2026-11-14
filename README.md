@@ -474,12 +474,12 @@ counter/gauge overhead is disclosed explicitly.
 ## Releasing
 
 Releases are automated with [release-plz](https://release-plz.dev). On every push
-to `main`, it opens or updates a release PR that bumps `chalk-metrics` and
-`chalk-metrics-macros` to the same next version and adds a CHANGELOG section
-generated from commit messages. Edit the PR's CHANGELOG if needed, wait for CI on
-`main` to pass, then merge it. Merging publishes `chalk-metrics-macros` and then
-`chalk-metrics` to crates.io, tags `v<version>`, and creates the GitHub release.
-Other merges to `main` never publish (`release_always = false` in
+to `main` that changes either crate, it opens or updates a release PR that bumps
+`chalk-metrics` and `chalk-metrics-macros` to the same next version and adds a
+CHANGELOG section generated from commit messages. Edit the PR's CHANGELOG if
+needed, then merge it. Merging runs the tests, publishes `chalk-metrics-macros`
+and then `chalk-metrics` to crates.io, tags `v<version>`, and creates the GitHub
+release. Other merges to `main` never publish (`release_always = false` in
 `release-plz.toml`).
 
 Release PRs are opened with the default `GITHUB_TOKEN`, so CI does not run on them
