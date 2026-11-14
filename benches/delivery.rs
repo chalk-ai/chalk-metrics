@@ -347,9 +347,9 @@ fn bytes_per_observation(traffic: &Traffic) -> String {
 fn raw_ceiling(transport: Transport, rate: usize, latencies: &[f64]) -> (String, usize) {
     let receiver = Receiver::start(transport);
     // Default client: queue capacity and flush intervals are left untouched.
-    let client = client::builder()
-        .with_exporter(receiver.exporter().build().unwrap())
-        .build_local();
+    let exporter = receiver.exporter().build().unwrap();
+    let drops = exporter.drop_counters();
+    let client = client::builder().with_exporter(exporter).build_local();
     let per_producer = rate / PRODUCERS;
     let recorded = per_producer * SECONDS * PRODUCERS;
     let cpu = cpu_seconds();
@@ -415,6 +415,8 @@ fn raw_ceiling(transport: Transport, rate: usize, latencies: &[f64]) -> (String,
             ),
             ("payload_bytes", traffic.bytes.to_string()),
             ("datagrams", traffic.datagrams.to_string()),
+            ("dropped_lines", drops.lines().to_string()),
+            ("dropped_datagrams", drops.datagrams().to_string()),
             ("bytes_per_observation", bytes_per_observation(&traffic)),
             ("process_cpu_ms", format!("{cpu_ms:.3}")),
         ],
@@ -459,6 +461,7 @@ fn aggregate_flush(runtime: &Runtime, transport: Transport, series: usize) -> St
         .default_tag("service", "engine")
         .build()
         .unwrap();
+    let drops = exporter.drop_counters();
     let metrics = aggregate_batch(series);
     // Counters and gauges are one line each.
     let expected = metrics.len();
@@ -503,6 +506,8 @@ fn aggregate_flush(runtime: &Runtime, transport: Transport, series: usize) -> St
             ),
             ("datagrams", datagrams.to_string()),
             ("export_ms", format!("{export_ms:.3}")),
+            ("dropped_lines", drops.lines().to_string()),
+            ("dropped_datagrams", drops.datagrams().to_string()),
         ],
     )
 }

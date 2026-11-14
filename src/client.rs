@@ -85,7 +85,9 @@ impl MetricsClientBuilder {
 
     /// Set the raw-observation export interval (default: 100 milliseconds),
     /// independently of the counter, gauge, and sketch flush interval.
-    /// Sequential or slow exporters can extend this latency.
+    /// Queued observations are exported every interval, or sooner once the
+    /// queue is a quarter full (checked every tenth of the interval, at least
+    /// 1 millisecond). Sequential or slow exporters can extend this latency.
     ///
     /// # Panics
     /// Panics if the interval is zero.
@@ -128,7 +130,9 @@ impl MetricsClientBuilder {
         self
     }
 
-    /// Set the bounded raw-sample queue capacity (default: 16,384).
+    /// Set the bounded raw-sample queue capacity (default: 16,384). A quarter
+    /// of this capacity is the level at which queued samples are exported
+    /// before the raw flush interval elapses.
     /// Recording never blocks: a full queue drops the newest raw observation,
     /// counted by `MetricsClient::dropped_raw_samples`. Sketches remain complete.
     ///

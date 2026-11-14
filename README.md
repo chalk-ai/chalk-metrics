@@ -401,8 +401,10 @@ chalk_metrics::client::builder()
 
 Counters, gauges, and sketches are exported on `flush_interval` (default 10
 seconds). Original observations use a separate `raw_sample_flush_interval`
-(default 100 milliseconds, must be positive). Both timers skip their immediate
-startup tick. Allow up to the relevant interval plus scheduling and exporter
+(default 100 milliseconds, must be positive). Raw observations are exported
+every raw flush interval, or sooner once the queue is a quarter full (checked
+ten times per interval, at least every millisecond). Both timers skip their
+immediate startup tick. Allow up to the relevant interval plus scheduling and exporter
 execution time. Slow exporters can extend either latency because calls are
 sequential, even with multiple runtime threads. A custom `Both` exporter receives
 independent raw and aggregate windows. Increasing `worker_threads` does not
@@ -417,6 +419,15 @@ overflow drops the newest raw sample. `client.dropped_raw_samples()` (local clie
 `chalk_metrics::client::dropped_raw_samples()` (global client) counts full or
 closed queue rejections. Sketch consumers still include these observations.
 This counter does not include network failures.
+
+The StatsD exporter never waits on the socket. A datagram the socket does not
+accept (for example a full receiver queue) is dropped, and the export call
+returns an error that the worker prints at most once per second per kind with a
+count of suppressed errors. Call `StatsdExporter::drop_counters()` before handing
+the exporter to the client: the returned `StatsdDropCounters` reports
+`datagrams()`, `lines()` and `bytes()` dropped, including single lines rejected
+for exceeding `max_buffer_size` (counted in lines and bytes only). Datagrams are
+sent while later lines are still being formatted, which keeps bursts small.
 
 UDP accepts IPv4, bracketed IPv6, and hostnames with ports. Dual-stack hostnames
 prefer IPv4, preserving `localhost` delivery to IPv4-only agents. Explicit IPv6
