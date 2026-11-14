@@ -240,10 +240,9 @@ impl StripedAggMap {
 
         match entry {
             hashbrown::hash_map::Entry::Occupied(e) => {
-                let entry = e.into_mut();
-                self.check_tags(&entry.key, tags_match);
-                entry.touched = true;
-                if let AggSlot::Gauge(ref slot) = entry.slot {
+                // Gauges persist in both modes, so they need no bookkeeping.
+                self.check_tags(&e.get().key, tags_match);
+                if let AggSlot::Gauge(ref slot) = e.get().slot {
                     slot.record(value);
                 }
             }

@@ -11,6 +11,12 @@ use chalk_metrics::export::FlushedValue;
 const SERIES: usize = 48;
 const THREADS: usize = 8;
 const OPS_PER_THREAD: usize = 20_000;
+/// Count series recorded in short bursts with long gaps, so they sit idle for
+/// many flushes while the other recorders keep the map busy.
+const SPARSE: usize = 4;
+const SPARSE_BURSTS: usize = 12;
+/// Slots: dense counts, dense histograms, then the sparse counts.
+const SLOTS: usize = 2 * SERIES + SPARSE;
 
 struct Rng(u64);
 
@@ -25,7 +31,8 @@ impl Rng {
     }
 }
 
-/// Slots 0..SERIES are count series, SERIES..2*SERIES are histogram series.
+/// Slots 0..SERIES are count series, SERIES..2*SERIES are histogram series,
+/// and the last SPARSE slots are the sparse count series.
 #[derive(Default, Clone, PartialEq, Debug)]
 struct Totals {
     count: i64,
@@ -42,19 +49,49 @@ fn run(retain: u32, seed: u64) {
         .flush_interval(Duration::from_secs(3600))
         .retain_idle_series(retain)
         .build_local();
-    let started: Vec<AtomicU64> = (0..2 * SERIES).map(|_| AtomicU64::new(0)).collect();
-    let completed: Vec<AtomicU64> = (0..2 * SERIES).map(|_| AtomicU64::new(0)).collect();
+    let started: Vec<AtomicU64> = (0..SLOTS).map(|_| AtomicU64::new(0)).collect();
+    let completed: Vec<AtomicU64> = (0..SLOTS).map(|_| AtomicU64::new(0)).collect();
     let done = AtomicBool::new(false);
-    let mut expected = vec![Totals::default(); 2 * SERIES];
-    let mut flushed_totals = vec![Totals::default(); 2 * SERIES];
+    // How often each sparse series had to build its tags (was registered).
+    let sparse_registrations: Vec<AtomicU64> = (0..SPARSE).map(|_| AtomicU64::new(0)).collect();
+    let mut expected = vec![Totals::default(); SLOTS];
+    let mut flushed_totals = vec![Totals::default(); SLOTS];
 
     std::thread::scope(|s| {
         let (client, started, completed, done) = (&client, &started, &completed, &done);
+        let sparse_registrations = &sparse_registrations;
+        let sparse = s.spawn(move || {
+            let mut mine = vec![Totals::default(); SLOTS];
+            for _ in 0..SPARSE_BURSTS {
+                for (series, registrations) in sparse_registrations.iter().enumerate() {
+                    let slot = 2 * SERIES + series;
+                    for _ in 0..3 {
+                        started[slot].fetch_add(1, Ordering::SeqCst);
+                        client.record_count(
+                            "stress_sparse",
+                            &[],
+                            series as u64,
+                            || {
+                                registrations.fetch_add(1, Ordering::SeqCst);
+                                tags(series)
+                            },
+                            1,
+                        );
+                        completed[slot].fetch_add(1, Ordering::SeqCst);
+                        mine[slot].count += 1;
+                    }
+                }
+                // Many flush periods: with retention on, the series are
+                // evicted here and registered again by the next burst.
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            mine
+        });
         let recorders: Vec<_> = (0..THREADS)
             .map(|t| {
                 s.spawn(move || {
                     let mut rng = Rng(seed.wrapping_mul(0x9E3779B97F4A7C15) ^ (t as u64 + 1));
-                    let mut mine = vec![Totals::default(); 2 * SERIES];
+                    let mut mine = vec![Totals::default(); SLOTS];
                     for op in 0..OPS_PER_THREAD {
                         let r = rng.next();
                         let series = (r >> 8) as usize % SERIES;
@@ -85,7 +122,7 @@ fn run(retain: u32, seed: u64) {
                             mine[slot].hist_n += 1;
                             mine[slot].hist_sum += value as f64;
                         }
-                        // Leave gaps so that some series sit idle between flushes.
+                        // Let the flusher and the other recorders interleave.
                         if op % 512 == 0 {
                             std::thread::yield_now();
                         }
@@ -96,8 +133,8 @@ fn run(retain: u32, seed: u64) {
             .collect();
 
         let flusher = s.spawn(move || {
-            let mut totals = vec![Totals::default(); 2 * SERIES];
-            let mut previous_before: Vec<u64> = vec![0; 2 * SERIES];
+            let mut totals = vec![Totals::default(); SLOTS];
+            let mut previous_before: Vec<u64> = vec![0; SLOTS];
             let mut absorb = |client: &MetricsClient| {
                 let before: Vec<u64> = completed.iter().map(|c| c.load(Ordering::SeqCst)).collect();
                 let flushed = client.flush();
@@ -105,10 +142,11 @@ fn run(retain: u32, seed: u64) {
                 let mut seen = HashSet::new();
                 for metric in flushed {
                     let series: usize = metric.tags.pairs[0].1.parse().unwrap();
-                    let slot = match metric.value {
-                        FlushedValue::Count(_) => series,
-                        FlushedValue::Histogram(_) => SERIES + series,
-                        FlushedValue::Gauge(_) => unreachable!(),
+                    let slot = match (metric.metric_name, &metric.value) {
+                        ("stress_sparse", _) => 2 * SERIES + series,
+                        (_, FlushedValue::Count(_)) => series,
+                        (_, FlushedValue::Histogram(_)) => SERIES + series,
+                        (_, FlushedValue::Gauge(_)) => unreachable!(),
                     };
                     assert!(
                         seen.insert(slot),
@@ -148,7 +186,7 @@ fn run(retain: u32, seed: u64) {
             totals
         });
 
-        for recorder in recorders {
+        for recorder in recorders.into_iter().chain([sparse]) {
             for (slot, mine) in recorder.join().unwrap().into_iter().enumerate() {
                 expected[slot].count += mine.count;
                 expected[slot].hist_n += mine.hist_n;
@@ -159,10 +197,20 @@ fn run(retain: u32, seed: u64) {
         flushed_totals = flusher.join().unwrap();
     });
 
-    for slot in 0..2 * SERIES {
+    for slot in 0..SLOTS {
         assert_eq!(
             expected[slot], flushed_totals[slot],
             "retain={retain} seed={seed} slot={slot}"
+        );
+    }
+    // Each sparse series went idle for far longer than the retention window
+    // between bursts, so it was removed and registered again while the other
+    // recorders and the flusher were running.
+    for (series, registrations) in sparse_registrations.iter().enumerate() {
+        let registrations = registrations.load(Ordering::SeqCst);
+        assert!(
+            registrations > 1,
+            "retain={retain} seed={seed}: sparse series {series} was registered {registrations} time(s)"
         );
     }
     client.shutdown();
