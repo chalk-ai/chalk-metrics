@@ -15,7 +15,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Format:** `cargo fmt`
 - **Check:** `cargo check`
 - **Run example:** `cargo run --example basic_usage`
-- **Benchmark:** `cargo bench`
+- **Benchmark:** `cargo bench` (targets and tracked numbers: `docs/goalposts.md`; a single target: `cargo bench --bench <name>`)
 
 ## Important Rules
 

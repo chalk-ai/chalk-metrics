@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Benchmarks only, no library changes: add goalpost benches for the generated
+  recording API, thread scaling, flush, delivery, export cost by metric kind and
+  macro compile time, plus an allocation-budget test that runs under `cargo test`.
+  Current values are recorded in [goalpost benchmarks](docs/goalposts.md).
 - Build and dependencies: update the lockfile (fixes RUSTSEC-2026-0386 in tokio and
   RUSTSEC-2026-0204 in a dev dependency), drop tokio's unused `net` feature, move to
   hashbrown 0.17 and syn 3, and declare `rust-version = "1.88"`. Exporters that use

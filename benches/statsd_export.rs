@@ -210,5 +210,42 @@ fn distribution_volume_benchmarks(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, statsd_benchmarks, distribution_volume_benchmarks);
+/// Counters, gauges and histograms exported separately, so the histogram share
+/// of a mixed aggregate flush is visible. Percentiles mode, 10,000 series per kind.
+fn by_kind_benchmarks(c: &mut Criterion) {
+    const SERIES: usize = 10_000;
+    let mut group = c.benchmark_group("statsd_export_by_kind");
+    group.throughput(Throughput::Elements(SERIES as u64));
+    // One histogram iteration takes hundreds of milliseconds; keep the run short.
+    group.sample_size(10);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    type MakeMetric = fn(usize) -> FlushedMetric;
+    let kinds: [(&str, MakeMetric); 3] = [
+        ("count", make_count_metric),
+        ("gauge", make_gauge_metric),
+        ("histogram", make_histogram_metric),
+    ];
+    for (kind, make) in kinds {
+        let drain = DrainSocket::new();
+        let exporter = StatsdExporter::udp(format!("127.0.0.1:{}", drain.port))
+            .namespace("myapp")
+            .histogram_mode(HistogramExportMode::Percentiles(vec![0.5, 0.9, 0.95, 0.99]))
+            .build()
+            .unwrap();
+        let metrics: Vec<_> = (0..SERIES).map(make).collect();
+        group.bench_function(kind, |b| {
+            b.iter(|| rt.block_on(exporter.export(&metrics)).unwrap());
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    statsd_benchmarks,
+    distribution_volume_benchmarks,
+    by_kind_benchmarks
+);
 criterion_main!(benches);

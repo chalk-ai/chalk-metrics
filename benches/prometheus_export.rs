@@ -130,5 +130,31 @@ fn prometheus_benchmarks(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, prometheus_benchmarks);
+/// Counters, gauges and histograms rendered separately, so the histogram share
+/// of a mixed render is visible. Two tags, 10,000 series per kind.
+fn by_kind_benchmarks(c: &mut Criterion) {
+    const SERIES: usize = 10_000;
+    let mut group = c.benchmark_group("prometheus_export_by_kind");
+    group.throughput(Throughput::Elements(SERIES as u64));
+    // One histogram iteration takes hundreds of milliseconds; keep the run short.
+    group.sample_size(10);
+    type MakeMetric = fn(usize, usize) -> FlushedMetric;
+    let kinds: [(&str, MakeMetric); 3] = [
+        ("count", make_count_metric),
+        ("gauge", make_gauge_metric),
+        ("histogram", make_histogram_metric),
+    ];
+    for (kind, make) in kinds {
+        let exporter = PrometheusExporter::builder().namespace("myapp").build();
+        let metrics: Vec<_> = (0..SERIES).map(|i| make(i, 2)).collect();
+        group.bench_function(kind, |b| {
+            b.iter(|| {
+                let _ = exporter.render_metrics(&metrics);
+            });
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, prometheus_benchmarks, by_kind_benchmarks);
 criterion_main!(benches);
