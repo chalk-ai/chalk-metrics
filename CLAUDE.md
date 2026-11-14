@@ -16,6 +16,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Check:** `cargo check`
 - **Run example:** `cargo run --example basic_usage`
 - **Benchmark:** `cargo bench`
+- **Release:** merge the release-plz release PR (see README "Releasing")
 
 ## Important Rules
 
