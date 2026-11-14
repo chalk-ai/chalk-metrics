@@ -1,7 +1,15 @@
-# Release notes
+# Changelog
 
-## Unreleased
+All notable changes to this project will be documented in this file.
 
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+- Releases are managed by release-plz: merging its release PR publishes both crates
+  to crates.io and tags `v<version>`. Both crates move to 0.0.4, past the existing
+  v0.0.1-v0.0.3 tags that were never published.
 - Build and dependencies: update the lockfile (fixes RUSTSEC-2026-0386 in tokio and
   RUSTSEC-2026-0204 in a dev dependency), drop tokio's unused `net` feature, move to
   hashbrown 0.17 and syn 3, and declare `rust-version = "1.88"`. Exporters that use
@@ -9,8 +17,6 @@
 - `python-bindings` now uses pyo3 0.30 (fixes RUSTSEC-2026-0176 and RUSTSEC-2026-0177).
   Crates enabling it must depend on pyo3 0.30. Generated tag classes opt into
   `from_py_object` so metric constructors still accept them.
-- Releases: `make release` creates a GitHub release, and publishing it publishes both
-  crates with the version taken from the tag.
 - Packaging: `chalk-metrics-macros` is versioned with `chalk-metrics` and published
   first, and the crate tarball contains only sources, README, LICENSE and CHANGELOG.
 - Fix series lookup after aggregation-map growth. A series now produces one entry

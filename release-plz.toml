@@ -1,0 +1,18 @@
+# https://release-plz.dev/docs/config
+[workspace]
+# Publish only when a release PR is merged, not on every push to main.
+release_always = false
+
+[[package]]
+name = "chalk-metrics"
+version_group = "chalk-metrics"
+git_tag_name = "v{{ version }}"
+
+# Published with chalk-metrics at the same version; it gets no tag, GitHub
+# release or changelog of its own.
+[[package]]
+name = "chalk-metrics-macros"
+version_group = "chalk-metrics"
+git_tag_enable = false
+git_release_enable = false
+changelog_update = false
