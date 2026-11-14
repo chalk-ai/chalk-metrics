@@ -470,3 +470,13 @@ accepted raw-sample recording, real UDP export, and Prometheus rendering.
 Distribution benchmarks count individual observations. Growth timings are
 reported alongside the baseline's duplicate-entry failures, and the measured
 counter/gauge overhead is disclosed explicitly.
+
+## Releasing
+
+Run `make release` from any checkout with `gh` logged in. It reads the latest
+GitHub release, asks for a patch, minor, major, or rc bump (for example
+`v0.0.3 -> v0.0.4` or `v0.0.4-rc.1`), and creates the GitHub release on `main`.
+Publishing the release runs the publish workflow, which writes the tag's version
+into both crates, runs the tests, and publishes `chalk-metrics-macros` and then
+`chalk-metrics` to crates.io. The `version` fields on `main` are placeholders;
+the tag decides the published version.

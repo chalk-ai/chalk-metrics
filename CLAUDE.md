@@ -16,6 +16,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Check:** `cargo check`
 - **Run example:** `cargo run --example basic_usage`
 - **Benchmark:** `cargo bench`
+- **Release:** `make release` (creates a GitHub release; CI publishes it to crates.io)
 
 ## Important Rules
 
