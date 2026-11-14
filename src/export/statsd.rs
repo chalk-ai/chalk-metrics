@@ -4,6 +4,7 @@ use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 #[cfg(unix)]
 use std::os::unix::net::UnixDatagram;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
@@ -31,6 +32,38 @@ impl Default for HistogramExportMode {
     }
 }
 
+/// Totals of data a [`StatsdExporter`] could not send and discarded.
+///
+/// The exporter never waits on the socket: a datagram the socket does not
+/// accept (a full receiver queue, a missing receiver, any send error) is
+/// dropped and counted here. A single line longer than `max_buffer_size` is
+/// also dropped and counted in `lines` and `bytes` (not `datagrams`). Obtain a
+/// handle with [`StatsdExporter::drop_counters`] before handing the exporter
+/// to the client.
+#[derive(Debug, Default)]
+pub struct StatsdDropCounters {
+    datagrams: AtomicU64,
+    lines: AtomicU64,
+    bytes: AtomicU64,
+}
+
+impl StatsdDropCounters {
+    /// Datagrams dropped because sending them failed.
+    pub fn datagrams(&self) -> u64 {
+        self.datagrams.load(Ordering::Relaxed)
+    }
+
+    /// Metric lines dropped, in failed datagrams or for exceeding the size limit.
+    pub fn lines(&self) -> u64 {
+        self.lines.load(Ordering::Relaxed)
+    }
+
+    /// Bytes of dropped lines and datagrams (line bytes only for oversized lines).
+    pub fn bytes(&self) -> u64 {
+        self.bytes.load(Ordering::Relaxed)
+    }
+}
+
 /// The socket backend for sending StatsD datagrams.
 enum Socket {
     Udp(UdpSocket),
@@ -55,6 +88,7 @@ pub struct StatsdExporter {
     distribution_value_packing: bool,
     max_buffer_size: usize,
     buffer: Mutex<String>,
+    drops: Arc<StatsdDropCounters>,
 }
 
 /// Builder for [`StatsdExporter`].
@@ -141,6 +175,7 @@ impl StatsdExporterBuilder {
             distribution_value_packing: self.distribution_value_packing,
             max_buffer_size: self.max_buffer_size,
             buffer: Mutex::new(String::with_capacity(self.max_buffer_size)),
+            drops: Arc::new(StatsdDropCounters::default()),
         })
     }
 }
@@ -177,6 +212,12 @@ impl StatsdExporter {
         }
     }
 
+    /// Shared counters of datagrams and lines dropped because the socket did
+    /// not accept them. Call before handing the exporter to the client.
+    pub fn drop_counters(&self) -> Arc<StatsdDropCounters> {
+        Arc::clone(&self.drops)
+    }
+
     fn full_name(&self, namespace: &[&str], metric_name: &str) -> String {
         let mut parts = Vec::new();
         if let Some(ns) = &self.namespace {
@@ -205,30 +246,28 @@ impl StatsdExporter {
     }
 
     /// Format all metrics into batched DogStatsD datagrams and send them.
+    /// Lines are produced lazily, so datagrams go out while later metrics are
+    /// still being formatted.
     fn send_metrics(&self, metrics: &[FlushedMetric]) -> Result<(), ExportError> {
-        let mut lines = Vec::new();
         let mut rejected = None;
-
-        for metric in metrics {
+        let lines = metrics.iter().flat_map(|metric| {
             let name = self.full_name(metric.namespace, metric.metric_name);
             let tags = self.format_tags(&metric.tags.pairs);
 
             match &metric.value {
-                FlushedValue::Count(value) => {
-                    lines.push(format!("{name}:{value}|c{tags}"));
-                }
-                FlushedValue::Gauge(value) => {
-                    lines.push(format!("{name}:{value}|g{tags}"));
-                }
+                FlushedValue::Count(value) => Lines::One(Some(format!("{name}:{value}|c{tags}"))),
+                FlushedValue::Gauge(value) => Lines::One(Some(format!("{name}:{value}|g{tags}"))),
                 FlushedValue::Histogram(sketch) => match &self.histogram_mode {
                     HistogramExportMode::Distribution => {
                         rejected.get_or_insert_with(|| ExportError::new(
                             "Distribution requires original samples; use MetricsClient or export_raw_points",
                         ));
+                        Lines::One(None)
                     }
                     HistogramExportMode::Percentiles(percentiles) => {
                         let count = sketch.count();
                         let avg = sketch.mean();
+                        let mut lines = Vec::with_capacity(2 + percentiles.len());
                         lines.push(format!("{name}.count:{count}|g{tags}"));
                         lines.push(format!("{name}.avg:{avg}|g{tags}"));
                         for &p in percentiles {
@@ -236,10 +275,11 @@ impl StatsdExporter {
                             let label = format_percentile_label(p);
                             lines.push(format!("{name}.{label}:{value}|g{tags}"));
                         }
+                        Lines::Many(lines.into_iter())
                     }
                 },
             }
-        }
+        });
 
         let result = self.send_lines(lines);
         match rejected {
@@ -266,7 +306,10 @@ impl StatsdExporter {
         self.send_lines(lines)
     }
 
-    fn pack_distribution_points(&self, points: &[RawDistributionPoint]) -> Vec<String> {
+    fn pack_distribution_points<'a>(
+        &'a self,
+        points: &'a [RawDistributionPoint],
+    ) -> impl Iterator<Item = String> + 'a {
         // Compare tag contents, not Arc addresses: direct callers can supply
         // separately allocated tags, and samples can span aggregation flushes.
         type Series<'a> = (
@@ -290,16 +333,16 @@ impl StatsdExporter {
             }
         }
 
-        let mut lines = Vec::new();
-        for (point, values) in groups {
+        // Format each group's lines only when the sender asks for them.
+        groups.into_iter().flat_map(move |(point, values)| {
             let name = self.full_name(point.namespace, point.metric_name);
             let tags = self.format_tags(&point.tags.pairs);
             if values.is_empty() {
-                lines.push(format_distribution_line(&name, point.value, &tags));
-                continue;
+                return Lines::One(Some(format_distribution_line(&name, point.value, &tags)));
             }
             let prefix = format!("{name}:");
             let suffix = format!("|d{tags}");
+            let mut lines = Vec::new();
             let mut line = prefix.clone();
             for value in std::iter::once(point.value).chain(values) {
                 let value = value.to_string();
@@ -316,8 +359,8 @@ impl StatsdExporter {
             }
             line.push_str(&suffix);
             lines.push(line);
-        }
-        lines
+            Lines::Many(lines.into_iter())
+        })
     }
 
     fn send_lines(&self, lines: impl IntoIterator<Item = String>) -> Result<(), ExportError> {
@@ -333,8 +376,13 @@ impl StatsdExporter {
         buffer.clear();
 
         let mut rejected = None;
+        let mut buffered_lines = 0u64;
         for line in lines {
             if line.len() > self.max_buffer_size {
+                self.drops.lines.fetch_add(1, Ordering::Relaxed);
+                self.drops
+                    .bytes
+                    .fetch_add(line.len() as u64, Ordering::Relaxed);
                 rejected.get_or_insert_with(|| {
                     ExportError::new(format!(
                         "metric line is {} bytes, exceeding the {} byte datagram limit",
@@ -346,19 +394,23 @@ impl StatsdExporter {
             }
             if !buffer.is_empty() && buffer.len() + 1 + line.len() > self.max_buffer_size {
                 if let Err(error) = send(&buffer) {
+                    self.count_dropped_datagram(buffered_lines, buffer.len());
                     rejected.get_or_insert(error);
                 }
                 buffer.clear();
+                buffered_lines = 0;
             }
             if !buffer.is_empty() {
                 buffer.push('\n');
             }
             buffer.push_str(&line);
+            buffered_lines += 1;
         }
 
         if !buffer.is_empty()
             && let Err(error) = send(&buffer)
         {
+            self.count_dropped_datagram(buffered_lines, buffer.len());
             rejected.get_or_insert(error);
         }
 
@@ -366,6 +418,12 @@ impl StatsdExporter {
             Some(error) => Err(error),
             None => Ok(()),
         }
+    }
+
+    fn count_dropped_datagram(&self, lines: u64, bytes: usize) {
+        self.drops.datagrams.fetch_add(1, Ordering::Relaxed);
+        self.drops.lines.fetch_add(lines, Ordering::Relaxed);
+        self.drops.bytes.fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
     fn send_buffer(&self, data: &str) -> Result<(), ExportError> {
@@ -438,6 +496,23 @@ fn connect_udp_addresses(addresses: impl IntoIterator<Item = SocketAddr>) -> io:
         }
     }
     Err(last_error)
+}
+
+/// Lines produced for one metric or series: a single line or a short batch.
+enum Lines {
+    One(Option<String>),
+    Many(std::vec::IntoIter<String>),
+}
+
+impl Iterator for Lines {
+    type Item = String;
+
+    fn next(&mut self) -> Option<String> {
+        match self {
+            Lines::One(line) => line.take(),
+            Lines::Many(lines) => lines.next(),
+        }
+    }
 }
 
 fn format_distribution_line(name: &str, value: f64, tags: &str) -> String {
@@ -627,9 +702,43 @@ mod tests {
         assert_eq!(result.unwrap_err().message, "injected send failure");
         assert_eq!(attempted, ["x:1|d", "x:2|d", "x:3|d"]);
     }
+    #[test]
+    fn failed_sends_and_oversized_lines_are_counted() {
+        let exporter = StatsdExporter::udp("127.0.0.1:8125")
+            .max_buffer_size(11)
+            .build()
+            .unwrap();
+        let counters = exporter.drop_counters();
+        let mut attempt = 0;
+        let result = exporter.send_lines_with(
+            [
+                "x:1|d".to_owned(),
+                "y:2|d".to_owned(),
+                "this-line-is-too-long".to_owned(),
+                "z:3|d".to_owned(),
+                "w:4|d".to_owned(),
+            ],
+            |_| {
+                attempt += 1;
+                if attempt == 1 {
+                    Err(ExportError::new("injected send failure"))
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        // The oversized line was rejected first, so its error takes precedence.
+        assert!(result.unwrap_err().message.contains("21 bytes"));
+        // First datagram "x:1|d\ny:2|d" (2 lines, 11 bytes) failed; the oversized
+        // line (21 bytes) counts as a line and bytes only; the second datagram
+        // "z:3|d\nw:4|d" was sent.
+        assert_eq!(counters.datagrams(), 1);
+        assert_eq!(counters.lines(), 3);
+        assert_eq!(counters.bytes(), 11 + 21);
+    }
+
     use crate::aggregator::sketch::UDDSketch;
     use crate::aggregator::striped_map::TagsData;
-    use std::sync::Arc;
 
     fn make_tags(pairs: Vec<(&'static str, std::borrow::Cow<'static, str>)>) -> Arc<TagsData> {
         Arc::new(TagsData { pairs })
