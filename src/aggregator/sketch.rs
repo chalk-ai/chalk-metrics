@@ -3,7 +3,7 @@
 // See: https://github.com/timescale/timescaledb-toolkit/blob/main/crates/udd-sketch/src/lib.rs
 // Paper: https://arxiv.org/pdf/2004.08604.pdf
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 /// Bucket key for the UDD Sketch. Values are mapped to logarithmic buckets;
 /// negative values, zero, and positive values are tracked separately.
@@ -67,13 +67,6 @@ struct SketchHashMap {
     head: SketchHashKey,
 }
 
-impl std::ops::Index<SketchHashKey> for SketchHashMap {
-    type Output = u64;
-    fn index(&self, id: SketchHashKey) -> &Self::Output {
-        &self.map[&id].count
-    }
-}
-
 /// Iterator over `(SketchHashKey, count)` pairs in increasing key order.
 pub struct SketchHashIterator<'a> {
     container: &'a SketchHashMap,
@@ -87,8 +80,9 @@ impl Iterator for SketchHashIterator<'_> {
             None
         } else {
             let key = self.next_key;
-            self.next_key = self.container.map[&self.next_key].next;
-            Some((key, self.container[key]))
+            let entry = &self.container.map[&key];
+            self.next_key = entry.next;
+            Some((key, entry.count))
         }
     }
 }
@@ -291,6 +285,57 @@ impl UDDSketch {
         unreachable!();
     }
 
+    /// Estimate several quantiles in a single walk over the buckets.
+    ///
+    /// Writes `estimate_quantile(quantiles[i])` into `out[i]` for every `i`;
+    /// the results are identical to calling [`Self::estimate_quantile`] once
+    /// per quantile. The single walk is used when `quantiles` is ascending;
+    /// any other order falls back to one call per quantile.
+    ///
+    /// # Panics
+    /// Panics if a quantile is outside `[0.0, 1.0]` or `out` is shorter than
+    /// `quantiles`.
+    pub fn estimate_quantiles(&self, quantiles: &[f64], out: &mut [f64]) {
+        assert!(out.len() >= quantiles.len());
+        assert!(quantiles.iter().all(|q| (0.0..=1.0).contains(q)));
+
+        if !quantiles.windows(2).all(|w| w[0] <= w[1]) {
+            for (slot, &q) in out.iter_mut().zip(quantiles) {
+                *slot = self.estimate_quantile(q);
+            }
+            return;
+        }
+
+        // Ranks are non-decreasing in the quantile, so one pass over the
+        // cumulative counts resolves every quantile in order.
+        let mut seen = 0u64;
+        let mut next = 0;
+        'walk: for (key, count) in self.buckets.iter() {
+            seen += count;
+            while next < quantiles.len() {
+                let rank = (self.num_values as f64 * quantiles[next]) as u64 + 1;
+                if rank >= self.num_values {
+                    // This and every later quantile is the last bucket.
+                    break 'walk;
+                }
+                if rank > seen {
+                    break;
+                }
+                out[next] = self.bucket_to_value(key);
+                next += 1;
+            }
+        }
+        if next < quantiles.len() {
+            let tail = self
+                .buckets
+                .iter()
+                .last()
+                .map(|(key, _)| self.bucket_to_value(key))
+                .unwrap_or(0.0);
+            out[next..quantiles.len()].fill(tail);
+        }
+    }
+
     #[inline]
     pub fn mean(&self) -> f64 {
         if self.num_values == 0 {
@@ -364,6 +409,57 @@ impl UDDSketch {
             }
         }
         1.0
+    }
+
+    /// Estimate the CDF at several values in a single walk over the buckets.
+    ///
+    /// Writes `estimate_quantile_at_value(values[i])` into `out[i]` for every
+    /// `i`; the results are identical to calling
+    /// [`Self::estimate_quantile_at_value`] once per value. The single walk is
+    /// used when `values` is ascending; any other order (or a NaN) falls back
+    /// to one call per value.
+    ///
+    /// # Panics
+    /// Panics if `out` is shorter than `values`.
+    pub fn estimate_quantiles_at_values(&self, values: &[f64], out: &mut [f64]) {
+        assert!(out.len() >= values.len());
+
+        if self.num_values == 0 {
+            out[..values.len()].fill(0.0);
+            return;
+        }
+        if !values.windows(2).all(|w| w[0] <= w[1]) {
+            for (slot, &v) in out.iter_mut().zip(values) {
+                *slot = self.estimate_quantile_at_value(v);
+            }
+            return;
+        }
+        if values.is_empty() {
+            return;
+        }
+
+        // Targets are non-decreasing in the value, so each bucket resolves
+        // every target that is not above it, then joins the running count.
+        let total = self.num_values as f64;
+        let mut next = 0;
+        let mut target = self.key(values[0]);
+        let mut count = 0.0;
+        for (key, bucket_count) in self.buckets.iter() {
+            while target <= key {
+                out[next] = if target == key {
+                    (count + bucket_count as f64 / 2.0) / total
+                } else {
+                    count / total
+                };
+                next += 1;
+                if next == values.len() {
+                    return;
+                }
+                target = self.key(values[next]);
+            }
+            count += bucket_count as f64;
+        }
+        out[next..values.len()].fill(1.0);
     }
 
     fn key(&self, value: f64) -> SketchHashKey {
