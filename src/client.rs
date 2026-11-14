@@ -113,7 +113,13 @@ impl MetricsClientBuilder {
         self
     }
 
-    /// Set the initial histogram error bound (default: 0.001).
+    /// Set the relative error histograms start with (default: 0.001).
+    ///
+    /// This is not a permanent bound: when a histogram needs more than
+    /// [`max_buckets`](Self::max_buckets) buckets, adjacent buckets are merged
+    /// and the error grows. After compaction it depends on the bucket count and
+    /// the value range; for positive values it is at most
+    /// `tanh(ln(max / min) / (max_buckets - 1))`.
     pub fn initial_error(mut self, e: f64) -> Self {
         self.initial_error = e;
         self
@@ -230,6 +236,17 @@ impl MetricsClient {
         self.aggregator.dropped_raw_samples()
     }
 
+    /// Number of recordings whose tags differed from the series already stored
+    /// under the same 64-bit tag hash. Such a recording is still added to the
+    /// existing series, so a non-zero value means two series were merged.
+    ///
+    /// Only macro-generated metrics are checked, and they record through the
+    /// global client. The string recording methods on this type take the hash
+    /// from the caller, so a client used only through them reports zero.
+    pub fn tag_hash_collisions(&self) -> u64 {
+        self.aggregator.tag_hash_collisions()
+    }
+
     /// Shut down the flush worker, draining accepted raw samples and performing
     /// a final export before joining the worker. Stop all recording threads first.
     /// This blocks on exporters and must not be called from an exporter callback.
@@ -252,6 +269,12 @@ pub fn builder() -> MetricsClientBuilder {
 /// queue. Returns zero before initialization. Transport failures are separate.
 pub fn dropped_raw_samples() -> u64 {
     GLOBAL.get().map_or(0, MetricsClient::dropped_raw_samples)
+}
+
+/// Number of tag-hash collisions seen by the global client (see
+/// [`MetricsClient::tag_hash_collisions`]). Returns zero before initialization.
+pub fn tag_hash_collisions() -> u64 {
+    GLOBAL.get().map_or(0, MetricsClient::tag_hash_collisions)
 }
 
 /// Shut down the global metrics client. Safe to call multiple times.
@@ -285,6 +308,7 @@ pub fn record_count(
         namespace,
         tags_hash,
         make_tags,
+        |_| true,
         delta,
     );
 }
@@ -297,12 +321,13 @@ pub fn record_count_named(
     namespace: &'static [&'static str],
     tags_hash: u64,
     make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
+    tags_match: impl FnOnce(&[(&'static str, std::borrow::Cow<'static, str>)]) -> bool,
     delta: i64,
 ) {
     if let Some(client) = GLOBAL.get() {
         client
             .aggregator
-            .record_count_named(name, namespace, tags_hash, make_tags, delta);
+            .record_count_named(name, namespace, tags_hash, make_tags, tags_match, delta);
     }
 }
 
@@ -320,6 +345,7 @@ pub fn record_gauge(
         namespace,
         tags_hash,
         make_tags,
+        |_| true,
         value,
     );
 }
@@ -332,12 +358,13 @@ pub fn record_gauge_named(
     namespace: &'static [&'static str],
     tags_hash: u64,
     make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
+    tags_match: impl FnOnce(&[(&'static str, std::borrow::Cow<'static, str>)]) -> bool,
     value: f64,
 ) {
     if let Some(client) = GLOBAL.get() {
         client
             .aggregator
-            .record_gauge_named(name, namespace, tags_hash, make_tags, value);
+            .record_gauge_named(name, namespace, tags_hash, make_tags, tags_match, value);
     }
 }
 
@@ -355,6 +382,7 @@ pub fn record_histogram(
         namespace,
         tags_hash,
         make_tags,
+        |_| true,
         value,
     );
 }
@@ -367,12 +395,13 @@ pub fn record_histogram_named(
     namespace: &'static [&'static str],
     tags_hash: u64,
     make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
+    tags_match: impl FnOnce(&[(&'static str, std::borrow::Cow<'static, str>)]) -> bool,
     value: f64,
 ) {
     if let Some(client) = GLOBAL.get() {
         client
             .aggregator
-            .record_histogram_named(name, namespace, tags_hash, make_tags, value);
+            .record_histogram_named(name, namespace, tags_hash, make_tags, tags_match, value);
     }
 }
 

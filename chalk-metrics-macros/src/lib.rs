@@ -154,6 +154,10 @@ fn expand_tags(input: TagsInput, python_bindings: bool) -> TokenStream2 {
                     fn export_value(&self) -> ::std::borrow::Cow<'static, str> {
                         ::std::borrow::Cow::Borrowed(self.as_str())
                     }
+
+                    fn value_str(&self) -> &str {
+                        self.as_str()
+                    }
                 }
             }
         } else {
@@ -218,6 +222,10 @@ fn expand_tags(input: TagsInput, python_bindings: bool) -> TokenStream2 {
 
                     fn export_value(&self) -> ::std::borrow::Cow<'static, str> {
                         ::std::borrow::Cow::Owned(self.to_string())
+                    }
+
+                    fn value_str(&self) -> &str {
+                        &self.0
                     }
                 }
             }
@@ -498,6 +506,7 @@ fn expand_metric(
     let mut constructor_args = Vec::new();
     let mut constructor_fields = Vec::new();
     let mut export_pairs = Vec::new();
+    let mut match_pairs = Vec::new();
     for tag in tags {
         let ty = &tag.ty;
         let field = tag.alias.clone().unwrap_or_else(|| default_field_ident(ty));
@@ -520,6 +529,14 @@ fn expand_metric(
                     ));
                 }
             });
+            match_pairs.push(quote! {
+                (
+                    #export_key,
+                    self.#field
+                        .as_ref()
+                        .map(<#ty as chalk_metrics::__private::MetricTag>::value_str),
+                ),
+            });
         } else {
             fields.push(quote! { pub #field: #ty, });
             constructor_args.push(quote! { #field: #ty });
@@ -529,9 +546,34 @@ fn expand_metric(
                     <#ty as chalk_metrics::__private::MetricTag>::export_value(&self.#field),
                 ));
             });
+            match_pairs.push(quote! {
+                (
+                    #export_key,
+                    ::std::option::Option::Some(
+                        <#ty as chalk_metrics::__private::MetricTag>::value_str(&self.#field),
+                    ),
+                ),
+            });
         }
         constructor_fields.push(quote! { #field, });
     }
+
+    // One shared helper compares the tags, so each metric only builds a small
+    // array. Metrics without tags need no call at all.
+    let tags_match_body = if tags.is_empty() {
+        quote! { pairs.is_empty() }
+    } else {
+        quote! { chalk_metrics::__private::tags_match(pairs, &[ #( #match_pairs )* ]) }
+    };
+
+    // Metrics without tags hash no fields, so their hash is a constant. It stays
+    // the std hasher's empty-input value, which `client::record_*` callers using
+    // the string API rely on to share the generated series.
+    let hasher = if tags.is_empty() {
+        quote! { ::std::collections::hash_map::DefaultHasher::new() }
+    } else {
+        quote! { chalk_metrics::__private::tag_hasher() }
+    };
 
     let record_method = match metric.kind {
         MetricKind::Count => quote! {
@@ -548,6 +590,7 @@ fn expand_metric(
                     Self::namespace(),
                     hash,
                     || self.export_pairs(),
+                    |pairs| self.tags_match(pairs),
                     value,
                 );
             }
@@ -561,6 +604,7 @@ fn expand_metric(
                     Self::namespace(),
                     hash,
                     || self.export_pairs(),
+                    |pairs| self.tags_match(pairs),
                     value,
                 );
             }
@@ -574,6 +618,7 @@ fn expand_metric(
                     Self::namespace(),
                     hash,
                     || self.export_pairs(),
+                    |pairs| self.tags_match(pairs),
                     value,
                 );
             }
@@ -649,10 +694,21 @@ fn expand_metric(
                 pairs
             }
 
+            /// Whether `pairs` (the tags stored for an existing series) hold the
+            /// same keys and values as this struct, in `export_pairs` order.
+            /// Allocation free.
+            #[inline]
+            fn tags_match(
+                &self,
+                pairs: &[(&'static str, ::std::borrow::Cow<'static, str>)],
+            ) -> bool {
+                #tags_match_body
+            }
+
             #[inline]
             fn tags_hash(&self) -> u64 {
                 use ::std::hash::{Hash, Hasher};
-                let mut hasher = ::std::collections::hash_map::DefaultHasher::new();
+                let mut hasher = #hasher;
                 self.hash(&mut hasher);
                 hasher.finish()
             }

@@ -4,7 +4,7 @@ use super::sketch::UDDSketch;
 
 /// A mutex-protected histogram slot backed by a UDD Sketch.
 ///
-/// On flush, the sketch is cloned and replaced with a fresh empty sketch,
+/// On flush, the sketch is swapped out for a fresh empty sketch,
 /// so that the next aggregation period starts clean.
 pub struct HistogramSlot {
     sketch: Mutex<UDDSketch>,
@@ -27,13 +27,14 @@ impl HistogramSlot {
         self.sketch.lock().add_value(value);
     }
 
-    /// Flush the histogram: clone the current sketch and replace with a fresh one.
-    /// Returns the sketch containing all values recorded since the last flush.
+    /// Flush the histogram: take the current sketch and leave a fresh one in
+    /// its place. Returns the sketch containing all values recorded since the
+    /// last flush.
     pub fn flush(&self) -> UDDSketch {
-        let mut guard = self.sketch.lock();
-        let snapshot = guard.clone();
-        *guard = UDDSketch::new(self.max_buckets, self.initial_error);
-        snapshot
+        std::mem::replace(
+            &mut *self.sketch.lock(),
+            UDDSketch::new(self.max_buckets, self.initial_error),
+        )
     }
 }
 

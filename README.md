@@ -282,6 +282,17 @@ let text = prom.get_metrics_text();
 
 Namespace segments are joined with `_`: `myapp_http_request_count_total`.
 
+The text is a snapshot of the last flush, not a scrape-ready exposition:
+
+- Counters are per-flush deltas, not cumulative totals.
+- A series is absent from the text when it was not recorded in the last
+  interval (gauges persist, so they stay until overwritten).
+- `# HELP` and `# TYPE` lines repeat for every series, so metrics with several
+  tag combinations produce duplicate metadata lines.
+
+For these reasons the output is not suitable for direct Prometheus scraping of
+counters or multi-series metrics.
+
 ### StatsD / DogStatsD
 
 ```rust
@@ -391,11 +402,18 @@ chalk_metrics::client::builder()
     .flush_interval(Duration::from_secs(10))
     .worker_threads(1)               // tokio runtime threads (default: 1)
     .max_buckets(200)                // histogram max buckets
-    .initial_error(0.001)            // histogram error bound
+    .initial_error(0.001)            // histogram starting relative error
     .raw_sample_queue_capacity(16_384) // queued original observations
     .raw_sample_flush_interval(Duration::from_millis(100))
     .init();                         // or .try_init() for Result
 ```
+
+`initial_error` is the relative error a histogram starts with, not a bound that
+holds forever. When a histogram needs more than `max_buckets` buckets, adjacent
+buckets are merged and the error grows. After compaction the error depends on
+the bucket count and the value range. For positive values it is at most
+`tanh(ln(max / min) / (max_buckets - 1))` over the values recorded in that
+interval.
 
 ### Flush latency, overflow, and shutdown
 
@@ -429,6 +447,15 @@ the exporter to the client: the returned `StatsdDropCounters` reports
 `datagrams()`, `lines()` and `bytes()` dropped, including single lines rejected
 for exceeding `max_buffer_size` (counted in lines and bytes only). Datagrams are
 sent while later lines are still being formatted, which keeps bursts small.
+
+A series is identified by its metric, namespace and a 64-bit hash of its tag
+values. When a macro-generated metric hits an existing series, its tag keys and
+values are compared with the stored ones; a mismatch (a hash collision) is
+counted by `chalk_metrics::client::tag_hash_collisions()` and the value is still
+added to the existing series, so a non-zero count means two series were merged.
+The string recording functions (`client::record_count` and friends, and a local
+`MetricsClient`) take the hash from the caller and are not checked, so
+`MetricsClient::tag_hash_collisions()` stays zero for them.
 
 UDP accepts IPv4, bracketed IPv6, and hostnames with ports. Dual-stack hostnames
 prefer IPv4, preserving `localhost` delivery to IPv4-only agents. Explicit IPv6

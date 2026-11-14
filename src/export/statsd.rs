@@ -270,8 +270,10 @@ impl StatsdExporter {
                         let mut lines = Vec::with_capacity(2 + percentiles.len());
                         lines.push(format!("{name}.count:{count}|g{tags}"));
                         lines.push(format!("{name}.avg:{avg}|g{tags}"));
-                        for &p in percentiles {
-                            let value = sketch.estimate_quantile(p);
+                        // One walk over the sketch for every percentile.
+                        let mut values = vec![0.0; percentiles.len()];
+                        sketch.estimate_quantiles(percentiles, &mut values);
+                        for (&p, value) in percentiles.iter().zip(values) {
                             let label = format_percentile_label(p);
                             lines.push(format!("{name}.{label}:{value}|g{tags}"));
                         }
