@@ -154,6 +154,10 @@ fn expand_tags(input: TagsInput, python_bindings: bool) -> TokenStream2 {
                     fn export_value(&self) -> ::std::borrow::Cow<'static, str> {
                         ::std::borrow::Cow::Borrowed(self.as_str())
                     }
+
+                    fn value_str(&self) -> &str {
+                        self.as_str()
+                    }
                 }
             }
         } else {
@@ -218,6 +222,10 @@ fn expand_tags(input: TagsInput, python_bindings: bool) -> TokenStream2 {
 
                     fn export_value(&self) -> ::std::borrow::Cow<'static, str> {
                         ::std::borrow::Cow::Owned(self.to_string())
+                    }
+
+                    fn value_str(&self) -> &str {
+                        &self.0
                     }
                 }
             }
@@ -498,6 +506,7 @@ fn expand_metric(
     let mut constructor_args = Vec::new();
     let mut constructor_fields = Vec::new();
     let mut export_pairs = Vec::new();
+    let mut match_pairs = Vec::new();
     for tag in tags {
         let ty = &tag.ty;
         let field = tag.alias.clone().unwrap_or_else(|| default_field_ident(ty));
@@ -520,6 +529,18 @@ fn expand_metric(
                     ));
                 }
             });
+            match_pairs.push(quote! {
+                if let Some(ref value) = self.#field {
+                    let Some((_, stored)) = pairs.get(index) else {
+                        return false;
+                    };
+                    let stored: &str = stored;
+                    if stored != <#ty as chalk_metrics::__private::MetricTag>::value_str(value) {
+                        return false;
+                    }
+                    index += 1;
+                }
+            });
         } else {
             fields.push(quote! { pub #field: #ty, });
             constructor_args.push(quote! { #field: #ty });
@@ -528,6 +549,16 @@ fn expand_metric(
                     #export_key,
                     <#ty as chalk_metrics::__private::MetricTag>::export_value(&self.#field),
                 ));
+            });
+            match_pairs.push(quote! {
+                let Some((_, stored)) = pairs.get(index) else {
+                    return false;
+                };
+                let stored: &str = stored;
+                if stored != <#ty as chalk_metrics::__private::MetricTag>::value_str(&self.#field) {
+                    return false;
+                }
+                index += 1;
             });
         }
         constructor_fields.push(quote! { #field, });
@@ -548,6 +579,7 @@ fn expand_metric(
                     Self::namespace(),
                     hash,
                     || self.export_pairs(),
+                    |pairs| self.tags_match(pairs),
                     value,
                 );
             }
@@ -561,6 +593,7 @@ fn expand_metric(
                     Self::namespace(),
                     hash,
                     || self.export_pairs(),
+                    |pairs| self.tags_match(pairs),
                     value,
                 );
             }
@@ -574,6 +607,7 @@ fn expand_metric(
                     Self::namespace(),
                     hash,
                     || self.export_pairs(),
+                    |pairs| self.tags_match(pairs),
                     value,
                 );
             }
@@ -647,6 +681,18 @@ fn expand_metric(
                 let mut pairs = Vec::new();
                 #( #export_pairs )*
                 pairs
+            }
+
+            /// Whether `pairs` (the tags stored for an existing series) hold the
+            /// same values as this struct, in `export_pairs` order. Allocation free.
+            #[inline]
+            fn tags_match(
+                &self,
+                pairs: &[(&'static str, ::std::borrow::Cow<'static, str>)],
+            ) -> bool {
+                let mut index = 0usize;
+                #( #match_pairs )*
+                index == pairs.len()
             }
 
             #[inline]

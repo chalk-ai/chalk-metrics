@@ -447,6 +447,14 @@ the exporter to the client: the returned `StatsdDropCounters` reports
 for exceeding `max_buffer_size` (counted in lines and bytes only). Datagrams are
 sent while later lines are still being formatted, which keeps bursts small.
 
+A series is identified by its metric, namespace and a 64-bit hash of its tag
+values. Each recording that hits an existing series compares the tag values
+with the stored ones; a mismatch (a hash collision) is counted by
+`client.tag_hash_collisions()` (local clients) or
+`chalk_metrics::client::tag_hash_collisions()` (global client) and the value is
+still added to the existing series. A non-zero count means two series were
+merged.
+
 UDP accepts IPv4, bracketed IPv6, and hostnames with ports. Dual-stack hostnames
 prefer IPv4, preserving `localhost` delivery to IPv4-only agents. Explicit IPv6
 and IPv6-only hostnames use IPv6. Address selection cannot detect which UDP
