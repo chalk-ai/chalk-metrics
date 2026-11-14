@@ -1,4 +1,15 @@
 use std::borrow::Cow;
+use std::hash::BuildHasher;
+
+/// Fixed seed so a tag set always hashes to the same value within and across runs.
+const TAG_HASH_SEED: u64 = 0x6368_616c_6b5f_6d74;
+
+/// Hasher used by generated metrics to fingerprint their tag values.
+#[doc(hidden)]
+#[inline]
+pub fn tag_hasher() -> impl std::hash::Hasher {
+    foldhash::quality::FixedState::with_seed(TAG_HASH_SEED).build_hasher()
+}
 
 /// A content-based name fingerprint computed at compile time by generated metrics.
 /// The fields are private so callers cannot provide a hash inconsistent with the name.

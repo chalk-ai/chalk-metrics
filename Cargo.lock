@@ -84,6 +84,7 @@ dependencies = [
  "async-trait",
  "chalk-metrics-macros",
  "criterion",
+ "foldhash",
  "hashbrown",
  "libc",
  "parking_lot",
