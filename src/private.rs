@@ -109,19 +109,15 @@ pub trait MetricTag {
     where
         Self: 'a;
 
-    fn export_value(&self) -> Cow<'static, str>;
-
-    /// The exported value without allocating. Equal to `export_value()`.
-    fn value_str(&self) -> &str;
-
     /// This tag as its borrowed form. Hashes and compares like `self`.
     fn tag_ref(&self) -> Self::Ref<'_>;
 }
 
 /// Borrowed tag values held by generated `Ref` structs.
 ///
-/// Hashing must feed the hasher the same bytes as the owned tag's `Hash`, so an
-/// owned and a borrowed record with equal values share one series.
+/// Generated owned structs record through their `Ref` struct, so the `Ref`
+/// struct's derived `Hash` is the only tag hash and both forms share one series
+/// by construction.
 #[doc(hidden)]
 pub trait TagRef: Copy + std::hash::Hash {
     /// The exported value without allocating.

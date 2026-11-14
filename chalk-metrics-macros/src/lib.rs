@@ -152,14 +152,6 @@ fn expand_tags(input: TagsInput, python_bindings: bool) -> TokenStream2 {
                     const EXPORT_NAME: &'static str = #export_name;
                     type Ref<'a> = Self;
 
-                    fn export_value(&self) -> ::std::borrow::Cow<'static, str> {
-                        ::std::borrow::Cow::Borrowed(self.as_str())
-                    }
-
-                    fn value_str(&self) -> &str {
-                        self.as_str()
-                    }
-
                     #[inline]
                     fn tag_ref(&self) -> Self {
                         *self
@@ -236,14 +228,6 @@ fn expand_tags(input: TagsInput, python_bindings: bool) -> TokenStream2 {
                 impl chalk_metrics::__private::MetricTag for #ident {
                     const EXPORT_NAME: &'static str = #export_name;
                     type Ref<'a> = &'a str;
-
-                    fn export_value(&self) -> ::std::borrow::Cow<'static, str> {
-                        ::std::borrow::Cow::Owned(self.to_string())
-                    }
-
-                    fn value_str(&self) -> &str {
-                        &self.0
-                    }
 
                     #[inline]
                     fn tag_ref(&self) -> &str {
@@ -347,7 +331,7 @@ struct MetricsInput {
 
 struct MetricGroup {
     namespace: Option<Path>,
-    tags: Vec<TagRef>,
+    tags: Vec<TagSpec>,
     metrics: Vec<MetricDef>,
 }
 
@@ -357,7 +341,7 @@ struct MetricDef {
     ident: Ident,
     name: LitStr,
     description: LitStr,
-    extra_tags: Vec<TagRef>,
+    extra_tags: Vec<TagSpec>,
 }
 
 #[derive(Clone, Copy)]
@@ -368,7 +352,7 @@ enum MetricKind {
 }
 
 #[derive(Clone)]
-struct TagRef {
+struct TagSpec {
     optional: bool,
     ty: Path,
     alias: Option<Ident>,
@@ -459,14 +443,14 @@ fn parse_metric_kind(ident: &Ident) -> Result<MetricKind> {
     }
 }
 
-fn parse_tag_list(input: ParseStream<'_>) -> Result<Vec<TagRef>> {
+fn parse_tag_list(input: ParseStream<'_>) -> Result<Vec<TagSpec>> {
     let content;
     bracketed!(content in input);
-    let refs = Punctuated::<TagRef, Token![,]>::parse_terminated(&content)?;
+    let refs = Punctuated::<TagSpec, Token![,]>::parse_terminated(&content)?;
     Ok(refs.into_iter().collect())
 }
 
-impl Parse for TagRef {
+impl Parse for TagSpec {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
         let optional = if input.peek(kw::optional) {
             input.parse::<kw::optional>()?;
@@ -508,7 +492,7 @@ fn expand_metrics(input: MetricsInput, python_bindings: bool) -> Result<TokenStr
 fn expand_metric(
     metric: MetricDef,
     namespace: &Path,
-    tags: &[TagRef],
+    tags: &[TagSpec],
     python_bindings: bool,
 ) -> Result<TokenStream2> {
     let vis = metric.vis;
@@ -807,7 +791,9 @@ fn expand_metric(
     let ref_struct = if tagged {
         let ref_doc = format!(
             "Borrowed form of [`{ident}`]: string tags are `&str`, so recording allocates \
-             nothing. It records the same series as the owned struct."
+             nothing. It records the same series as the owned struct. Build it where \
+             you record: its lifetime is invariant, so values borrowed for different \
+             lifetimes do not unify."
         );
         quote! {
             #[doc = #ref_doc]
