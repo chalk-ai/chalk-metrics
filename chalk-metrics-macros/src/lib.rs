@@ -531,11 +531,13 @@ fn expand_metric(
             });
             match_pairs.push(quote! {
                 if let Some(ref value) = self.#field {
-                    let Some((_, stored)) = pairs.get(index) else {
+                    let Some((key, stored)) = pairs.get(index) else {
                         return false;
                     };
                     let stored: &str = stored;
-                    if stored != <#ty as chalk_metrics::__private::MetricTag>::value_str(value) {
+                    if *key != #export_key
+                        || stored != <#ty as chalk_metrics::__private::MetricTag>::value_str(value)
+                    {
                         return false;
                     }
                     index += 1;
@@ -551,11 +553,13 @@ fn expand_metric(
                 ));
             });
             match_pairs.push(quote! {
-                let Some((_, stored)) = pairs.get(index) else {
+                let Some((key, stored)) = pairs.get(index) else {
                     return false;
                 };
                 let stored: &str = stored;
-                if stored != <#ty as chalk_metrics::__private::MetricTag>::value_str(&self.#field) {
+                if *key != #export_key
+                    || stored != <#ty as chalk_metrics::__private::MetricTag>::value_str(&self.#field)
+                {
                     return false;
                 }
                 index += 1;
@@ -693,7 +697,8 @@ fn expand_metric(
             }
 
             /// Whether `pairs` (the tags stored for an existing series) hold the
-            /// same values as this struct, in `export_pairs` order. Allocation free.
+            /// same keys and values as this struct, in `export_pairs` order.
+            /// Allocation free.
             #[inline]
             fn tags_match(
                 &self,

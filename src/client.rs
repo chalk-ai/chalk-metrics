@@ -118,7 +118,8 @@ impl MetricsClientBuilder {
     /// This is not a permanent bound: when a histogram needs more than
     /// [`max_buckets`](Self::max_buckets) buckets, adjacent buckets are merged
     /// and the error grows. After compaction it depends on the bucket count and
-    /// the value range, and is at most `tanh(ln(max / min) / max_buckets)`.
+    /// the value range; for positive values it is at most
+    /// `tanh(ln(max / min) / (max_buckets - 1))`.
     pub fn initial_error(mut self, e: f64) -> Self {
         self.initial_error = e;
         self
@@ -235,9 +236,13 @@ impl MetricsClient {
         self.aggregator.dropped_raw_samples()
     }
 
-    /// Number of recordings whose tag values differed from the series already
-    /// stored under the same 64-bit tag hash. Such a recording is still added to
-    /// the existing series, so a non-zero value means two series were merged.
+    /// Number of recordings whose tags differed from the series already stored
+    /// under the same 64-bit tag hash. Such a recording is still added to the
+    /// existing series, so a non-zero value means two series were merged.
+    ///
+    /// Only macro-generated metrics are checked, and they record through the
+    /// global client. The string recording methods on this type take the hash
+    /// from the caller, so a client used only through them reports zero.
     pub fn tag_hash_collisions(&self) -> u64 {
         self.aggregator.tag_hash_collisions()
     }
