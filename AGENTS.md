@@ -47,7 +47,7 @@ Guidance for coding agents working in this repository.
 - `src/aggregator/count.rs` — lock-free `AtomicI64` (swap-to-zero on flush)
 - `src/aggregator/gauge.rs` — lock-free `AtomicU64` storing f64 as bits (persists across flushes)
 - `src/aggregator/sketch.rs` — UDD Sketch for approximate quantiles (from Timescale, Apache 2.0)
-- `src/aggregator/histogram.rs` — `parking_lot::Mutex<UDDSketch>` (clone-and-reset on flush)
+- `src/aggregator/histogram.rs` — `parking_lot::Mutex<UDDSketch>` (swapped for a fresh sketch on flush)
 
 ### Client & Worker
 - `src/client.rs` — `OnceLock` singleton, builder pattern, `atexit` auto-shutdown

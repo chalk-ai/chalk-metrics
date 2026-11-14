@@ -113,7 +113,12 @@ impl MetricsClientBuilder {
         self
     }
 
-    /// Set the initial histogram error bound (default: 0.001).
+    /// Set the relative error histograms start with (default: 0.001).
+    ///
+    /// This is not a permanent bound: when a histogram needs more than
+    /// [`max_buckets`](Self::max_buckets) buckets, adjacent buckets are merged
+    /// and the error grows. After compaction it depends on the bucket count and
+    /// the value range, and is at most `tanh(ln(max / min) / max_buckets)`.
     pub fn initial_error(mut self, e: f64) -> Self {
         self.initial_error = e;
         self
