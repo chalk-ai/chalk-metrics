@@ -44,6 +44,7 @@ Guidance for coding agents working in this repository.
 ### Aggregation
 - `src/aggregator/striped_map.rs` — 64-stripe concurrent map using `parking_lot::Mutex` and the `hashbrown` `Entry` API
 - Uses `&'static str` pointer address for metric identity hashing (no u16 discriminant)
+- A series is identified by metric, namespace, kind and the 64-bit tag hash. On a lookup hit the generated `tags_match` compares tag values (`MetricTag::value_str`, no allocation); a mismatch increments `tag_hash_collisions` and the value still goes into the existing series
 - `src/aggregator/count.rs` — lock-free `AtomicI64` (swap-to-zero on flush)
 - `src/aggregator/gauge.rs` — lock-free `AtomicU64` storing f64 as bits (persists across flushes)
 - `src/aggregator/sketch.rs` — UDD Sketch for approximate quantiles (from Timescale, Apache 2.0)
