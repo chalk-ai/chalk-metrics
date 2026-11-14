@@ -27,11 +27,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      # Release PRs are opened with GITHUB_TOKEN, so CI does not run on them;
-      # test here so a failing commit is never published.
-      - run: cargo test --locked --workspace
-      - run: cargo test --locked --workspace --all-features
       - uses: release-plz/action@66b324fd6c72d05d2a08568492ecdd62bfb8a62b # v0.5.148
         with:
           command: release

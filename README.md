@@ -477,12 +477,14 @@ Releases are automated with [release-plz](https://release-plz.dev). On every pus
 to `main` that changes either crate, it opens or updates a release PR that bumps
 `chalk-metrics` and `chalk-metrics-macros` to the same next version and adds a
 CHANGELOG section generated from commit messages. Edit the PR's CHANGELOG if
-needed, then merge it. Merging runs the tests, publishes `chalk-metrics-macros`
-and then `chalk-metrics` to crates.io, tags `v<version>`, and creates the GitHub
-release. Other merges to `main` never publish (`release_always = false` in
+needed (release-plz rewrites the PR on every push to `main`, so edit just before
+merging), then merge it once its checks pass. Merging publishes
+`chalk-metrics-macros` and then `chalk-metrics` to crates.io, tags `v<version>`,
+and creates the GitHub release. Other merges to `main` never publish (`release_always = false` in
 `release-plz.toml`).
 
-Release PRs are opened with the default `GITHUB_TOKEN`, so CI does not run on them
-automatically; close and reopen the PR to run it. The repository must allow GitHub
-Actions to create pull requests (Settings > Actions > General > Workflow
-permissions).
+CI runs on pull requests only, including release PRs, so the release PR's checks
+test exactly what gets published. Branch protection on `main` requires the `test`,
+`msrv`, `audit`, and `package` checks before any PR, including a release PR, can be
+merged. The repository must allow GitHub Actions to create pull requests (Settings >
+Actions > General > Workflow permissions).
