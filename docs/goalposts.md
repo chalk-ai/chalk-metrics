@@ -34,6 +34,49 @@ each bench ran once, so treat timing differences under about 10% as noise and
 compare only runs from the same machine. Socket settings: `net.core.rmem_default`
 and `net.core.wmem_default` 212992, `net.unix.max_dgram_qlen` 512.
 
+## After the performance stack
+
+The tables further down were recorded before the performance stack (delivery
+without stalling, sketch and tag-hash work, borrowed string tags, optional
+series retention) and are kept as the baseline. This section lists what the
+stack changed. Each bench was run on the commit before the stack and on the
+last commit of the stack back to back, on the same shared machine as above
+while other workloads were running; timings are the best of two or three such
+passes, and differences under about 10% are noise.
+
+| Bench and case | Before | After |
+|---|---:|---:|
+| `delivery`: lines delivered of a 10,000-series flush over a Unix socket (worst of five) | 7,521 | 10,000 |
+| `delivery`: highest rate with no raw-sample queue drops, UDP and Unix socket | 150,000/s | 400,000/s (the bench maximum) |
+| `delivery`: transport loss at 150,000 observations/s over a Unix socket | 46.7% | 0% |
+| `delivery`: bytes per observation at 150,000/s over a Unix socket | 20.9 | 21.6 |
+| `metrics_throughput`: histogram record into a sketch | 51.9 ns | 32.4 ns |
+| `flush`: one flush of 100,000 histogram series | 42.9 ms | 9.9 ms |
+| `flush`: longest recording stall during that flush | 931 µs | about 290 µs |
+| `statsd_export`: per histogram series (Percentiles) | 12.5 µs | 5.5 µs |
+| `prometheus_export`: per histogram series | 16.6 µs | 5.2 µs |
+| `generated_recording`: count, string + enum built per call | 43.8 ns | 42.0 ns |
+| `generated_recording`: count, string + enum through the borrowed struct | not available | 25.9 ns |
+| `generated_recording`: count, one enum tag | 20.1 ns | 22.1 ns |
+| `generated_recording`: count, five tags prebuilt | 43.0 ns | 37.0 ns |
+| `flush`: first record of 10,000 counts after a flush | 887 µs | 887 µs by default, 167 µs with `retain_idle_series` |
+| `flush`: one flush of 100,000 count series | 3.5 ms | 3.6 ms |
+| `compile_time`: 1,000 metrics, dev build | 3.5 s | 6.1 s |
+| `compile_time`: 1,000 metrics, release build | 15.2 s | 15.9 s |
+
+Allocations per recording call (`tests/alloc_budget.rs`) are unchanged for the
+owned structs (1 per string tag built per call) and 0 for the new borrowed
+structs. New cases added by the stack: the `*_borrowed` cases in
+`generated_recording`, `record_after_flush/after_flush_retained` and
+`flush/idle_retained/100000_series` in `flush`, and `dropped_lines` /
+`dropped_datagrams` in the `delivery` rows.
+
+Known costs: every tagged metric now also expands to a borrowed struct, which
+is most of the dev-build increase; a recording call on a one- or two-tag metric
+pays about 2 ns for comparing its tags with the stored series; and each map
+entry is 8 bytes larger, which shows in the map-growth and large count-flush
+cases (5 to 17% between the last two commits of the stack).
+
 ## Recording through generated metrics
 
 `generated_recording` (time per call) and `tests/alloc_budget.rs` (exact
