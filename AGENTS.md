@@ -44,7 +44,7 @@ Guidance for coding agents working in this repository.
 ### Aggregation
 - `src/aggregator/striped_map.rs` — 64-stripe concurrent map using `parking_lot::Mutex` and the `hashbrown` `Entry` API
 - Uses `&'static str` pointer address for metric identity hashing (no u16 discriminant)
-- Generated `tags_hash()` uses `__private::tag_hasher()` (foldhash `quality::FixedState`, fixed seed); `tests/tag_hash_quality.rs` guards against collisions. A series is identified by metric, namespace, kind and the 64-bit tag hash. On a lookup hit the generated `tags_match` compares tag values (`MetricTag::value_str`, no allocation); a mismatch increments `tag_hash_collisions` and the value still goes into the existing series
+- Generated `tags_hash()` uses `__private::tag_hasher()` (foldhash `quality::FixedState`, fixed seed); `tests/tag_hash_quality.rs` guards against collisions. A series is identified by metric, namespace, kind, the 64-bit tag hash and a probe index. On a lookup hit the generated `tags_match` compares tag keys and values (`MetricTag::value_str`, no allocation); tag sets that share a hash become separate series (probe 0, 1, ... up to 8 per hash, then the last one is shared) and `tag_hash_collisions` counts recordings that stepped past another tag set. The string recording functions pass `|_| true`, so they always use probe 0
 - `src/aggregator/count.rs` — lock-free `AtomicI64` (swap-to-zero on flush)
 - `src/aggregator/gauge.rs` — lock-free `AtomicU64` storing f64 as bits (persists across flushes)
 - `src/aggregator/sketch.rs` — UDD Sketch for approximate quantiles (from Timescale, Apache 2.0)

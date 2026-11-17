@@ -1,5 +1,6 @@
-//! Series are keyed by a 64-bit tag hash; the macros compare tag values on every
-//! hit so a collision would be counted. With realistic distinct tag sets the
+//! Series are keyed by a 64-bit tag hash; the macros compare tag keys and values
+//! on every hit, and tag sets that share a hash are kept as separate series (the
+//! collision counter is informational). With realistic distinct tag sets the
 //! count must stay zero and every distinct set must be its own series.
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

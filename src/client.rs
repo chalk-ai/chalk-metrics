@@ -236,13 +236,17 @@ impl MetricsClient {
         self.aggregator.dropped_raw_samples()
     }
 
-    /// Number of recordings whose tags differed from the series already stored
-    /// under the same 64-bit tag hash. Such a recording is still added to the
-    /// existing series, so a non-zero value means two series were merged.
+    /// Number of recordings that had to step past a series with different tags
+    /// stored under the same 64-bit tag hash. Macro-generated metrics compare
+    /// tag keys and values on a hit, and tag sets that share a hash are kept as
+    /// separate series (up to eight per hash; beyond that a recording is added
+    /// to the last one). The counter is informational: nothing is merged unless
+    /// that limit is reached.
     ///
-    /// Only macro-generated metrics are checked, and they record through the
+    /// Only macro-generated metrics are compared, and they record through the
     /// global client. The string recording methods on this type take the hash
-    /// from the caller, so a client used only through them reports zero.
+    /// from the caller, are not compared, and always use the first series
+    /// stored under that hash, so a client used only through them reports zero.
     pub fn tag_hash_collisions(&self) -> u64 {
         self.aggregator.tag_hash_collisions()
     }
@@ -271,8 +275,9 @@ pub fn dropped_raw_samples() -> u64 {
     GLOBAL.get().map_or(0, MetricsClient::dropped_raw_samples)
 }
 
-/// Number of tag-hash collisions seen by the global client (see
-/// [`MetricsClient::tag_hash_collisions`]). Returns zero before initialization.
+/// Number of recordings on the global client that stepped past a different tag
+/// set with the same hash (see [`MetricsClient::tag_hash_collisions`]). Such
+/// tag sets are kept as separate series. Returns zero before initialization.
 pub fn tag_hash_collisions() -> u64 {
     GLOBAL.get().map_or(0, MetricsClient::tag_hash_collisions)
 }
@@ -321,7 +326,7 @@ pub fn record_count_named(
     namespace: &'static [&'static str],
     tags_hash: u64,
     make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
-    tags_match: impl FnOnce(&[(&'static str, std::borrow::Cow<'static, str>)]) -> bool,
+    tags_match: impl Fn(&[(&'static str, std::borrow::Cow<'static, str>)]) -> bool,
     delta: i64,
 ) {
     if let Some(client) = GLOBAL.get() {
@@ -358,7 +363,7 @@ pub fn record_gauge_named(
     namespace: &'static [&'static str],
     tags_hash: u64,
     make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
-    tags_match: impl FnOnce(&[(&'static str, std::borrow::Cow<'static, str>)]) -> bool,
+    tags_match: impl Fn(&[(&'static str, std::borrow::Cow<'static, str>)]) -> bool,
     value: f64,
 ) {
     if let Some(client) = GLOBAL.get() {
@@ -395,7 +400,7 @@ pub fn record_histogram_named(
     namespace: &'static [&'static str],
     tags_hash: u64,
     make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
-    tags_match: impl FnOnce(&[(&'static str, std::borrow::Cow<'static, str>)]) -> bool,
+    tags_match: impl Fn(&[(&'static str, std::borrow::Cow<'static, str>)]) -> bool,
     value: f64,
 ) {
     if let Some(client) = GLOBAL.get() {

@@ -45,8 +45,15 @@ enum MetricKind {
     Histogram,
 }
 
+/// Most series kept apart under one tag hash. Colliding tag sets take the next
+/// probe; if all are taken by other tag sets, a recording joins the last one.
+/// This bounds memory and lookup time (gauges persist forever) even if a
+/// `tags_match` were inconsistent with the stored tags.
+const MAX_COLLIDING_SERIES: u32 = 8;
+
 // Hashes choose buckets; equality includes the metric's namespace and kind.
-// tags_hash is the fingerprint supplied by the generated recording API.
+// tags_hash is the fingerprint supplied by the generated recording API, and
+// probe separates tag sets that share it (0 for the first).
 #[derive(Debug, PartialEq, Eq)]
 struct SeriesKey {
     fingerprint: u64,
@@ -54,12 +61,14 @@ struct SeriesKey {
     metric_name: &'static str,
     tags_hash: u64,
     kind: MetricKind,
+    probe: u32,
 }
 
 impl std::hash::Hash for SeriesKey {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         // HashMap still owns hashing, including rehashing during growth. Reuse
-        // the placement fingerprint, but compare full identity on collisions.
+        // the placement fingerprint (probes of one hash share a stripe), but
+        // compare full identity on collisions.
         state.write_u64(self.fingerprint);
     }
 }
@@ -127,40 +136,31 @@ impl StripedAggMap {
         namespace: &'static [&'static str],
         tags_hash: u64,
         make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
-        tags_match: impl FnOnce(&[(&'static str, std::borrow::Cow<'static, str>)]) -> bool,
+        tags_match: impl Fn(&[(&'static str, std::borrow::Cow<'static, str>)]) -> bool,
         delta: i64,
     ) {
         let combined = combine_hash(name.hash(), tags_hash);
-        let metric_name = name.as_str();
         let stripe_idx = combined as usize & STRIPE_MASK;
         let mut guard = self.stripes[stripe_idx].lock();
-
-        let entry = guard.entry(SeriesKey {
-            fingerprint: combined,
-            namespace,
-            metric_name,
-            tags_hash,
-            kind: MetricKind::Count,
-        });
-
-        match entry {
-            hashbrown::hash_map::Entry::Occupied(e) => {
-                self.check_tags(&e.get().0, tags_match);
-                if let AggSlot::Count(ref slot) = e.get().1 {
+        self.with_series(
+            &mut guard,
+            SeriesKey {
+                fingerprint: combined,
+                namespace,
+                metric_name: name.as_str(),
+                tags_hash,
+                kind: MetricKind::Count,
+                probe: 0,
+            },
+            make_tags,
+            tags_match,
+            || AggSlot::Count(CountSlot::new()),
+            |_, slot| {
+                if let AggSlot::Count(slot) = slot {
                     slot.record(delta);
                 }
-            }
-            hashbrown::hash_map::Entry::Vacant(e) => {
-                let slot = CountSlot::new();
-                slot.record(delta);
-                let key = AggKey {
-                    namespace,
-                    metric_name,
-                    tags_data: Arc::new(TagsData { pairs: make_tags() }),
-                };
-                e.insert((key, AggSlot::Count(slot)));
-            }
-        }
+            },
+        );
     }
 
     #[inline]
@@ -189,40 +189,31 @@ impl StripedAggMap {
         namespace: &'static [&'static str],
         tags_hash: u64,
         make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
-        tags_match: impl FnOnce(&[(&'static str, std::borrow::Cow<'static, str>)]) -> bool,
+        tags_match: impl Fn(&[(&'static str, std::borrow::Cow<'static, str>)]) -> bool,
         value: f64,
     ) {
         let combined = combine_hash(name.hash(), tags_hash);
-        let metric_name = name.as_str();
         let stripe_idx = combined as usize & STRIPE_MASK;
         let mut guard = self.stripes[stripe_idx].lock();
-
-        let entry = guard.entry(SeriesKey {
-            fingerprint: combined,
-            namespace,
-            metric_name,
-            tags_hash,
-            kind: MetricKind::Gauge,
-        });
-
-        match entry {
-            hashbrown::hash_map::Entry::Occupied(e) => {
-                self.check_tags(&e.get().0, tags_match);
-                if let AggSlot::Gauge(ref slot) = e.get().1 {
+        self.with_series(
+            &mut guard,
+            SeriesKey {
+                fingerprint: combined,
+                namespace,
+                metric_name: name.as_str(),
+                tags_hash,
+                kind: MetricKind::Gauge,
+                probe: 0,
+            },
+            make_tags,
+            tags_match,
+            || AggSlot::Gauge(GaugeSlot::new()),
+            |_, slot| {
+                if let AggSlot::Gauge(slot) = slot {
                     slot.record(value);
                 }
-            }
-            hashbrown::hash_map::Entry::Vacant(e) => {
-                let slot = GaugeSlot::new();
-                slot.record(value);
-                let key = AggKey {
-                    namespace,
-                    metric_name,
-                    tags_data: Arc::new(TagsData { pairs: make_tags() }),
-                };
-                e.insert((key, AggSlot::Gauge(slot)));
-            }
-        }
+            },
+        );
     }
 
     #[inline]
@@ -251,44 +242,39 @@ impl StripedAggMap {
         namespace: &'static [&'static str],
         tags_hash: u64,
         make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
-        tags_match: impl FnOnce(&[(&'static str, std::borrow::Cow<'static, str>)]) -> bool,
+        tags_match: impl Fn(&[(&'static str, std::borrow::Cow<'static, str>)]) -> bool,
         value: f64,
     ) {
         let combined = combine_hash(name.hash(), tags_hash);
         let metric_name = name.as_str();
         let stripe_idx = combined as usize & STRIPE_MASK;
         let mut guard = self.stripes[stripe_idx].lock();
-        let (key, slot) = match guard.entry(SeriesKey {
-            fingerprint: combined,
-            namespace,
-            metric_name,
-            tags_hash,
-            kind: MetricKind::Histogram,
-        }) {
-            hashbrown::hash_map::Entry::Occupied(e) => {
-                self.check_tags(&e.get().0, tags_match);
-                e.into_mut()
-            }
-            hashbrown::hash_map::Entry::Vacant(e) => {
-                let slot = if self.aggregate_histograms {
+        let tags = self.with_series(
+            &mut guard,
+            SeriesKey {
+                fingerprint: combined,
+                namespace,
+                metric_name,
+                tags_hash,
+                kind: MetricKind::Histogram,
+                probe: 0,
+            },
+            make_tags,
+            tags_match,
+            || {
+                if self.aggregate_histograms {
                     AggSlot::Histogram(HistogramSlot::new(self.max_buckets, self.initial_error))
                 } else {
                     AggSlot::RawDistribution
-                };
-                e.insert((
-                    AggKey {
-                        namespace,
-                        metric_name,
-                        tags_data: Arc::new(TagsData { pairs: make_tags() }),
-                    },
-                    slot,
-                ))
-            }
-        };
-        if let AggSlot::Histogram(slot) = slot {
-            slot.record(value);
-        }
-        let tags = self.raw_sender.as_ref().map(|_| Arc::clone(&key.tags_data));
+                }
+            },
+            |key, slot| {
+                if let AggSlot::Histogram(slot) = slot {
+                    slot.record(value);
+                }
+                self.raw_sender.as_ref().map(|_| Arc::clone(&key.tags_data))
+            },
+        );
         drop(guard);
         if let (Some(sender), Some(tags)) = (&self.raw_sender, tags)
             && sender
@@ -304,18 +290,62 @@ impl StripedAggMap {
         }
     }
 
-    /// Series are identified by their 64-bit tag hash. When a recording hits an
-    /// existing series, `tags_match` compares the caller's tag values with the
-    /// stored ones; a mismatch is a hash collision. It is counted, and the value
-    /// is still recorded into the existing series.
+    /// Finds the series for `key` (probe 0) and runs `record` on it, creating
+    /// it with `new_slot` and `make_tags` if it does not exist. Series are
+    /// identified by a 64-bit tag hash; when the stored tags are not the
+    /// caller's (`tags_match` is false) that is a hash collision, and the
+    /// recording moves on to the next probe, so different tag sets stay
+    /// separate series. After `MAX_COLLIDING_SERIES` probes it joins the last.
+    /// The first probe is the usual one: one `entry` lookup, one `tags_match`.
     #[inline]
-    fn check_tags(
+    fn with_series<R>(
         &self,
-        key: &AggKey,
-        tags_match: impl FnOnce(&[(&'static str, std::borrow::Cow<'static, str>)]) -> bool,
-    ) {
-        if !tags_match(&key.tags_data.pairs) {
-            self.tag_hash_collisions.fetch_add(1, Ordering::Relaxed);
+        map: &mut HashMap<SeriesKey, (AggKey, AggSlot)>,
+        mut key: SeriesKey,
+        make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
+        tags_match: impl Fn(&[(&'static str, std::borrow::Cow<'static, str>)]) -> bool,
+        new_slot: impl FnOnce() -> AggSlot,
+        record: impl FnOnce(&AggKey, &AggSlot) -> R,
+    ) -> R {
+        let (namespace, metric_name) = (key.namespace, key.metric_name);
+        loop {
+            match map.entry(key) {
+                hashbrown::hash_map::Entry::Occupied(e) => {
+                    let (series_key, slot) = e.get();
+                    let probe = e.key().probe;
+                    if probe + 1 == MAX_COLLIDING_SERIES || tags_match(&series_key.tags_data.pairs)
+                    {
+                        if probe > 0 {
+                            self.tag_hash_collisions.fetch_add(1, Ordering::Relaxed);
+                        }
+                        return record(series_key, slot);
+                    }
+                    let next = SeriesKey {
+                        fingerprint: e.key().fingerprint,
+                        namespace,
+                        metric_name,
+                        tags_hash: e.key().tags_hash,
+                        kind: e.key().kind,
+                        probe: probe + 1,
+                    };
+                    key = next;
+                }
+                hashbrown::hash_map::Entry::Vacant(e) => {
+                    let probe = e.key().probe;
+                    if probe > 0 {
+                        self.tag_hash_collisions.fetch_add(1, Ordering::Relaxed);
+                    }
+                    let (series_key, slot) = e.insert((
+                        AggKey {
+                            namespace,
+                            metric_name,
+                            tags_data: Arc::new(TagsData { pairs: make_tags() }),
+                        },
+                        new_slot(),
+                    ));
+                    return record(series_key, slot);
+                }
+            }
         }
     }
 
@@ -666,44 +696,233 @@ mod tests {
         }
     }
 
-    #[test]
-    fn tag_mismatch_on_existing_series_is_counted_and_still_recorded() {
-        const NAME: MetricName = MetricName::new("collide");
-        let map = make_map();
-        let tags = || vec![("k", "a".into())];
-        // A new series never consults the comparison.
-        map.record_count_named(NAME, &[], 7, tags, |_| panic!("vacant"), 1);
-        map.record_gauge_named(NAME, &[], 7, tags, |_| panic!("vacant"), 1.0);
-        map.record_histogram_named(NAME, &[], 7, tags, |_| panic!("vacant"), 1.0);
-        assert_eq!(map.tag_hash_collisions(), 0);
+    type Pairs = Vec<(&'static str, std::borrow::Cow<'static, str>)>;
 
-        // Matching tags on a hit are not collisions.
-        let stored = |pairs: &[(&'static str, std::borrow::Cow<'static, str>)]| {
-            assert_eq!(pairs.len(), 1);
-            assert_eq!(pairs[0], ("k", std::borrow::Cow::Borrowed("a")));
-            true
-        };
-        map.record_count_named(NAME, &[], 7, Vec::new, stored, 1);
-        assert_eq!(map.tag_hash_collisions(), 0);
+    const COLLIDE: MetricName = MetricName::new("collide");
 
-        // Different tags on a hit: counted, and the value still lands in the series.
-        map.record_count_named(NAME, &[], 7, Vec::new, |_| false, 10);
-        map.record_gauge_named(NAME, &[], 7, Vec::new, |_| false, 5.0);
-        map.record_histogram_named(NAME, &[], 7, Vec::new, |_| false, 3.0);
-        assert_eq!(map.tag_hash_collisions(), 3);
+    /// Tags of the test series `v`: one pair, `k = v`.
+    fn tags_of(v: &'static str) -> impl Fn() -> Pairs + Copy {
+        move || vec![("k", v.into())]
+    }
 
-        let flushed = map.flush();
-        assert_eq!(flushed.len(), 3);
-        for metric in flushed {
-            match metric.value {
-                FlushedValue::Count(value) => assert_eq!(value, 12),
-                FlushedValue::Gauge(value) => assert_eq!(value, 5.0),
-                FlushedValue::Histogram(sketch) => {
-                    assert_eq!(sketch.count(), 2);
-                    assert_eq!(sketch.sum(), 4.0);
-                }
-            }
+    /// A real comparison of stored tags with the series `v`.
+    fn matches(
+        v: &'static str,
+    ) -> impl Fn(&[(&'static str, std::borrow::Cow<'static, str>)]) -> bool + Copy {
+        move |pairs| pairs.len() == 1 && pairs[0].0 == "k" && pairs[0].1 == v
+    }
+
+    fn rec_count(map: &StripedAggMap, v: &'static str, delta: i64) {
+        map.record_count_named(COLLIDE, &[], 7, tags_of(v), matches(v), delta);
+    }
+
+    fn rec_gauge(map: &StripedAggMap, v: &'static str, value: f64) {
+        map.record_gauge_named(COLLIDE, &[], 7, tags_of(v), matches(v), value);
+    }
+
+    fn rec_hist(map: &StripedAggMap, v: &'static str, value: f64) {
+        map.record_histogram_named(COLLIDE, &[], 7, tags_of(v), matches(v), value);
+    }
+
+    /// Flushed series as `(tag value, kind) -> value` (histograms: sum).
+    fn flushed_series(
+        map: &StripedAggMap,
+    ) -> std::collections::BTreeMap<(String, &'static str), f64> {
+        let mut out = std::collections::BTreeMap::new();
+        for metric in map.flush() {
+            assert_eq!(metric.tags.pairs.len(), 1);
+            let tag = metric.tags.pairs[0].1.to_string();
+            let (kind, value) = match metric.value {
+                FlushedValue::Count(v) => ("count", v as f64),
+                FlushedValue::Gauge(v) => ("gauge", v),
+                FlushedValue::Histogram(sketch) => ("hist", sketch.sum()),
+            };
+            assert!(out.insert((tag, kind), value).is_none(), "duplicate series");
         }
+        out
+    }
+
+    fn series_of(
+        map: &std::collections::BTreeMap<(String, &'static str), f64>,
+        tag: &str,
+        kind: &'static str,
+    ) -> f64 {
+        *map.get(&(tag.to_owned(), kind))
+            .unwrap_or_else(|| panic!("no {kind} series {tag}"))
+    }
+
+    #[test]
+    fn colliding_tag_sets_are_separate_series() {
+        let map = make_map();
+        rec_count(&map, "a", 1);
+        rec_count(&map, "b", 10);
+        rec_gauge(&map, "a", 1.5);
+        rec_gauge(&map, "b", 2.5);
+        rec_hist(&map, "a", 3.0);
+        rec_hist(&map, "b", 4.0);
+        rec_hist(&map, "b", 5.0);
+
+        let flushed = flushed_series(&map);
+        assert_eq!(flushed.len(), 6);
+        assert_eq!(series_of(&flushed, "a", "count"), 1.0);
+        assert_eq!(series_of(&flushed, "b", "count"), 10.0);
+        assert_eq!(series_of(&flushed, "a", "gauge"), 1.5);
+        assert_eq!(series_of(&flushed, "b", "gauge"), 2.5);
+        assert_eq!(series_of(&flushed, "a", "hist"), 3.0);
+        assert_eq!(series_of(&flushed, "b", "hist"), 9.0);
+    }
+
+    #[test]
+    fn colliding_tag_sets_send_their_own_tags_in_raw_mode() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let map = StripedAggMap::new(200, 0.001, Some(tx));
+        rec_hist(&map, "a", 1.0);
+        rec_hist(&map, "b", 2.0);
+        rec_hist(&map, "a", 3.0);
+        rec_hist(&map, "b", 4.0);
+
+        let mut got = Vec::new();
+        while let Ok(point) = rx.try_recv() {
+            assert_eq!(point.tags.pairs.len(), 1);
+            got.push((point.tags.pairs[0].1.to_string(), point.value));
+        }
+        let expected: Vec<_> = [("a", 1.0), ("b", 2.0), ("a", 3.0), ("b", 4.0)]
+            .into_iter()
+            .map(|(tag, value)| (tag.to_owned(), value))
+            .collect();
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn interleaved_colliding_recordings_keep_exact_totals() {
+        let map = make_map();
+        rec_count(&map, "a", 1);
+        rec_count(&map, "b", 10);
+        rec_count(&map, "a", 2);
+        rec_count(&map, "b", 20);
+        let flushed = flushed_series(&map);
+        assert_eq!(flushed.len(), 2);
+        assert_eq!(series_of(&flushed, "a", "count"), 3.0);
+        assert_eq!(series_of(&flushed, "b", "count"), 30.0);
+    }
+
+    #[test]
+    fn colliding_series_are_correct_after_a_flush_in_either_order() {
+        let map = make_map();
+        rec_count(&map, "a", 1);
+        rec_count(&map, "b", 10);
+        assert_eq!(map.flush().len(), 2);
+
+        rec_count(&map, "b", 20);
+        rec_count(&map, "a", 2);
+        let flushed = flushed_series(&map);
+        assert_eq!(flushed.len(), 2);
+        assert_eq!(series_of(&flushed, "a", "count"), 2.0);
+        assert_eq!(series_of(&flushed, "b", "count"), 20.0);
+    }
+
+    #[test]
+    fn colliding_gauges_persist_as_two_series() {
+        let map = make_map();
+        rec_gauge(&map, "a", 1.5);
+        rec_gauge(&map, "b", 2.5);
+        for _ in 0..2 {
+            let flushed = flushed_series(&map);
+            assert_eq!(flushed.len(), 2);
+            assert_eq!(series_of(&flushed, "a", "gauge"), 1.5);
+            assert_eq!(series_of(&flushed, "b", "gauge"), 2.5);
+        }
+    }
+
+    #[test]
+    fn three_tag_sets_under_one_hash_are_three_series() {
+        let map = make_map();
+        for (tag, delta) in [("a", 1), ("b", 2), ("c", 3), ("a", 10), ("c", 30)] {
+            rec_count(&map, tag, delta);
+        }
+        let flushed = flushed_series(&map);
+        assert_eq!(flushed.len(), 3);
+        assert_eq!(series_of(&flushed, "a", "count"), 11.0);
+        assert_eq!(series_of(&flushed, "b", "count"), 2.0);
+        assert_eq!(series_of(&flushed, "c", "count"), 33.0);
+    }
+
+    #[test]
+    fn colliding_series_are_bounded_and_nothing_is_lost() {
+        const TAGS: [&str; 10] = ["t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9"];
+        let map = make_map();
+        for tag in TAGS {
+            rec_count(&map, tag, 1);
+            rec_gauge(&map, tag, 1.0);
+        }
+        let flushed = flushed_series(&map);
+        assert_eq!(flushed.len(), 16, "eight count and eight gauge series");
+        for tag in &TAGS[..7] {
+            assert_eq!(series_of(&flushed, tag, "count"), 1.0);
+        }
+        // t8 and t9 share the last series with t7.
+        assert_eq!(series_of(&flushed, "t7", "count"), 3.0);
+        let total: f64 = flushed
+            .iter()
+            .filter(|((_, kind), _)| *kind == "count")
+            .map(|(_, value)| value)
+            .sum();
+        assert_eq!(total, 10.0);
+        assert!(!flushed.contains_key(&("t8".to_owned(), "count")));
+        assert!(!flushed.contains_key(&("t9".to_owned(), "count")));
+    }
+
+    #[test]
+    fn collision_counter_counts_recordings_that_step_past_another_tag_set() {
+        let map = make_map();
+        rec_count(&map, "a", 1);
+        rec_count(&map, "a", 1);
+        rec_gauge(&map, "a", 1.0);
+        rec_hist(&map, "a", 1.0);
+        assert_eq!(map.tag_hash_collisions(), 0, "nothing collides");
+
+        rec_count(&map, "b", 1);
+        assert_eq!(map.tag_hash_collisions(), 1);
+        rec_count(&map, "b", 1);
+        assert_eq!(map.tag_hash_collisions(), 2);
+        rec_count(&map, "a", 1);
+        assert_eq!(map.tag_hash_collisions(), 2, "first series is not a step");
+
+        rec_count(&map, "c", 1);
+        assert_eq!(
+            map.tag_hash_collisions(),
+            3,
+            "one per recording, not per step"
+        );
+    }
+
+    #[test]
+    fn concurrent_recordings_of_colliding_tag_sets_are_exact() {
+        let map = Arc::new(make_map());
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let map = Arc::clone(&map);
+                std::thread::spawn(move || {
+                    for _ in 0..1000 {
+                        rec_count(&map, "a", 1);
+                        rec_count(&map, "b", 2);
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let flushed = flushed_series(&map);
+        assert_eq!(flushed.len(), 2);
+        assert_eq!(series_of(&flushed, "a", "count"), 4000.0);
+        assert_eq!(series_of(&flushed, "b", "count"), 8000.0);
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn series_key_stays_56_bytes() {
+        assert_eq!(std::mem::size_of::<SeriesKey>(), 56);
     }
 
     #[test]

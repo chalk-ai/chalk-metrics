@@ -450,12 +450,14 @@ sent while later lines are still being formatted, which keeps bursts small.
 
 A series is identified by its metric, namespace and a 64-bit hash of its tag
 values. When a macro-generated metric hits an existing series, its tag keys and
-values are compared with the stored ones; a mismatch (a hash collision) is
-counted by `chalk_metrics::client::tag_hash_collisions()` and the value is still
-added to the existing series, so a non-zero count means two series were merged.
-The string recording functions (`client::record_count` and friends, and a local
-`MetricsClient`) take the hash from the caller and are not checked, so
-`MetricsClient::tag_hash_collisions()` stays zero for them.
+values are compared with the stored ones. Tag sets that share a hash are kept
+as separate series (up to eight per hash; beyond that a recording is added to
+the last one). `chalk_metrics::client::tag_hash_collisions()` counts recordings
+that had to step past another tag set; it is informational. The string
+recording functions (`client::record_count` and friends, and a local
+`MetricsClient`) take the hash from the caller, are not compared, and always use
+the first series stored under that hash, so `MetricsClient::tag_hash_collisions()`
+stays zero for them.
 
 UDP accepts IPv4, bracketed IPv6, and hostnames with ports. Dual-stack hostnames
 prefer IPv4, preserving `localhost` delivery to IPv4-only agents. Explicit IPv6
