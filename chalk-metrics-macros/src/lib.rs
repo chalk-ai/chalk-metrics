@@ -566,15 +566,6 @@ fn expand_metric(
         quote! { chalk_metrics::__private::tags_match(pairs, &[ #( #match_pairs )* ]) }
     };
 
-    // Metrics without tags hash no fields, so their hash is a constant. It stays
-    // the std hasher's empty-input value, which `client::record_*` callers using
-    // the string API rely on to share the generated series.
-    let hasher = if tags.is_empty() {
-        quote! { ::std::collections::hash_map::DefaultHasher::new() }
-    } else {
-        quote! { chalk_metrics::__private::tag_hasher() }
-    };
-
     let record_method = match metric.kind {
         MetricKind::Count => quote! {
             /// Record a count increment of 1.
@@ -708,7 +699,7 @@ fn expand_metric(
             #[inline]
             fn tags_hash(&self) -> u64 {
                 use ::std::hash::{Hash, Hasher};
-                let mut hasher = #hasher;
+                let mut hasher = ::std::collections::hash_map::DefaultHasher::new();
                 self.hash(&mut hasher);
                 hasher.finish()
             }
