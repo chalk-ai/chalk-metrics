@@ -452,6 +452,12 @@ Run benchmarks with:
 cargo bench
 ```
 
+[Goalpost benchmarks](docs/goalposts.md) lists every bench target, the number
+each one tracks, and the current value: the generated recording API by tag
+shape, thread scaling, flush cost and stalls, raw-sample and socket delivery,
+export cost by metric kind, wire bytes per observation, and macro compile time.
+Allocations per recording call are enforced by `tests/alloc_budget.rs`.
+
 Before/after results, reproduction commands, workload definitions, and the
 measurement environment are recorded in [adoption benchmarks](docs/adoption-benchmarks.md).
 The latest [stack review results](docs/stack-review.md) compare upstream, the

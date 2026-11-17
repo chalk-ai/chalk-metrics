@@ -15,7 +15,7 @@ Guidance for coding agents working in this repository.
 - **Format:** `cargo fmt`
 - **Check:** `cargo check`
 - **Run example:** `cargo run --example basic_usage`
-- **Benchmark:** `cargo bench`
+- **Benchmark:** `cargo bench` (targets and tracked numbers: `docs/goalposts.md`; a single target: `cargo bench --bench <name>`)
 - **Release:** merge the release-plz release PR (see README "Releasing")
 
 ## Important Rules
