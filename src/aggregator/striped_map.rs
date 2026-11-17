@@ -17,17 +17,9 @@ const STRIPE_MASK: usize = 63;
 
 /// Tag data stored in the aggregation map, used by exporters during flush.
 /// Contains `(export_name, value)` pairs computed once on insertion.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TagsData {
     pub pairs: Vec<(&'static str, std::borrow::Cow<'static, str>)>,
-}
-
-/// Key stored in the aggregation map.
-#[derive(Debug)]
-struct AggKey {
-    namespace: &'static [&'static str],
-    metric_name: &'static str,
-    tags_data: Arc<TagsData>,
 }
 
 /// Aggregation slot: one of count, gauge, or histogram.
@@ -45,8 +37,7 @@ enum MetricKind {
     Histogram,
 }
 
-// Hashes choose buckets; equality includes the metric's namespace and kind.
-// tags_hash is the fingerprint supplied by the generated recording API.
+// Hashes choose buckets; equality compares the full series identity, including tags.
 #[derive(Debug, PartialEq, Eq)]
 struct SeriesKey {
     fingerprint: u64,
@@ -54,6 +45,7 @@ struct SeriesKey {
     metric_name: &'static str,
     tags_hash: u64,
     kind: MetricKind,
+    tags_data: Arc<TagsData>,
 }
 
 impl std::hash::Hash for SeriesKey {
@@ -64,7 +56,89 @@ impl std::hash::Hash for SeriesKey {
     }
 }
 
-type Stripe = Mutex<HashMap<SeriesKey, (AggKey, AggSlot)>>;
+type TagPairs = Vec<(&'static str, std::borrow::Cow<'static, str>)>;
+type Stripe = Mutex<HashMap<SeriesKey, AggSlot>>;
+
+trait RecordTags {
+    fn matches(&self, pairs: &TagPairs) -> bool;
+    fn into_pairs(self) -> TagPairs;
+}
+
+impl RecordTags for TagPairs {
+    fn matches(&self, pairs: &TagPairs) -> bool {
+        self == pairs
+    }
+
+    fn into_pairs(self) -> TagPairs {
+        self
+    }
+}
+
+struct BorrowedTags<F, M> {
+    matches: F,
+    make: M,
+}
+
+impl<F, M> RecordTags for BorrowedTags<F, M>
+where
+    F: Fn(&[(&'static str, std::borrow::Cow<'static, str>)]) -> bool,
+    M: FnOnce() -> TagPairs,
+{
+    fn matches(&self, pairs: &TagPairs) -> bool {
+        (self.matches)(pairs)
+    }
+
+    fn into_pairs(self) -> TagPairs {
+        (self.make)()
+    }
+}
+
+// Lookup and stored keys hash the same placement fingerprint. A matching hash
+// only identifies candidates; equality always checks every exported tag pair.
+struct SeriesLookup<'a, T> {
+    fingerprint: u64,
+    namespace: &'static [&'static str],
+    metric_name: &'static str,
+    tags_hash: u64,
+    kind: MetricKind,
+    tags: &'a T,
+}
+
+impl<T> std::hash::Hash for SeriesLookup<'_, T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write_u64(self.fingerprint);
+    }
+}
+
+impl<T: RecordTags> hashbrown::Equivalent<SeriesKey> for SeriesLookup<'_, T> {
+    fn equivalent(&self, key: &SeriesKey) -> bool {
+        self.fingerprint == key.fingerprint
+            && self.namespace == key.namespace
+            && self.metric_name == key.metric_name
+            && self.tags_hash == key.tags_hash
+            && self.kind == key.kind
+            && self.tags.matches(&key.tags_data.pairs)
+    }
+}
+
+impl SeriesKey {
+    fn new(
+        name: MetricName,
+        namespace: &'static [&'static str],
+        tags_hash: u64,
+        kind: MetricKind,
+        tags: TagPairs,
+    ) -> Self {
+        Self {
+            fingerprint: combine_hash(name.hash(), tags_hash),
+            namespace,
+            metric_name: name.as_str(),
+            tags_hash,
+            kind,
+            tags_data: Arc::new(TagsData { pairs: tags }),
+        }
+    }
+}
 
 pub struct StripedAggMap {
     stripes: Box<[Stripe]>,
@@ -99,13 +173,15 @@ impl StripedAggMap {
         self
     }
 
+    /// Record a count, materializing tags on every call to compare full identity.
+    /// Macro-generated metrics use a borrowed comparison on cache hits instead.
     #[inline]
     pub fn record_count(
         &self,
         metric_name: &'static str,
         namespace: &'static [&'static str],
         tags_hash: u64,
-        make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
+        make_tags: impl FnOnce() -> TagPairs,
         delta: i64,
     ) {
         self.record_count_named(
@@ -123,48 +199,75 @@ impl StripedAggMap {
         name: MetricName,
         namespace: &'static [&'static str],
         tags_hash: u64,
-        make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
+        make_tags: impl FnOnce() -> TagPairs,
+        delta: i64,
+    ) {
+        self.record_count_with_tags(name, namespace, tags_hash, make_tags(), delta);
+    }
+
+    #[inline]
+    pub(crate) fn record_count_matched(
+        &self,
+        name: MetricName,
+        namespace: &'static [&'static str],
+        tags_hash: u64,
+        matches: impl Fn(&[(&'static str, std::borrow::Cow<'static, str>)]) -> bool,
+        make: impl FnOnce() -> TagPairs,
+        delta: i64,
+    ) {
+        self.record_count_with_tags(
+            name,
+            namespace,
+            tags_hash,
+            BorrowedTags { matches, make },
+            delta,
+        );
+    }
+
+    #[inline]
+    fn record_count_with_tags<T: RecordTags>(
+        &self,
+        name: MetricName,
+        namespace: &'static [&'static str],
+        tags_hash: u64,
+        tags: T,
         delta: i64,
     ) {
         let combined = combine_hash(name.hash(), tags_hash);
-        let metric_name = name.as_str();
-        let stripe_idx = combined as usize & STRIPE_MASK;
-        let mut guard = self.stripes[stripe_idx].lock();
-
-        let entry = guard.entry(SeriesKey {
+        let query = SeriesLookup {
             fingerprint: combined,
             namespace,
-            metric_name,
+            metric_name: name.as_str(),
             tags_hash,
             kind: MetricKind::Count,
-        });
-
-        match entry {
-            hashbrown::hash_map::Entry::Occupied(e) => {
-                if let AggSlot::Count(ref slot) = e.get().1 {
-                    slot.record(delta);
-                }
-            }
-            hashbrown::hash_map::Entry::Vacant(e) => {
-                let slot = CountSlot::new();
-                slot.record(delta);
-                let key = AggKey {
-                    namespace,
-                    metric_name,
-                    tags_data: Arc::new(TagsData { pairs: make_tags() }),
-                };
-                e.insert((key, AggSlot::Count(slot)));
-            }
+            tags: &tags,
+        };
+        let mut guard = self.stripes[combined as usize & STRIPE_MASK].lock();
+        if let Some(AggSlot::Count(slot)) = guard.get_mut(&query) {
+            slot.record(delta);
+        } else {
+            let slot = CountSlot::new();
+            slot.record(delta);
+            let key = SeriesKey::new(
+                name,
+                namespace,
+                tags_hash,
+                MetricKind::Count,
+                tags.into_pairs(),
+            );
+            guard.insert(key, AggSlot::Count(slot));
         }
     }
 
+    /// Record a gauge, materializing tags on every call to compare full identity.
+    /// Macro-generated metrics use a borrowed comparison on cache hits instead.
     #[inline]
     pub fn record_gauge(
         &self,
         metric_name: &'static str,
         namespace: &'static [&'static str],
         tags_hash: u64,
-        make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
+        make_tags: impl FnOnce() -> TagPairs,
         value: f64,
     ) {
         self.record_gauge_named(
@@ -182,48 +285,75 @@ impl StripedAggMap {
         name: MetricName,
         namespace: &'static [&'static str],
         tags_hash: u64,
-        make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
+        make_tags: impl FnOnce() -> TagPairs,
+        value: f64,
+    ) {
+        self.record_gauge_with_tags(name, namespace, tags_hash, make_tags(), value);
+    }
+
+    #[inline]
+    pub(crate) fn record_gauge_matched(
+        &self,
+        name: MetricName,
+        namespace: &'static [&'static str],
+        tags_hash: u64,
+        matches: impl Fn(&[(&'static str, std::borrow::Cow<'static, str>)]) -> bool,
+        make: impl FnOnce() -> TagPairs,
+        value: f64,
+    ) {
+        self.record_gauge_with_tags(
+            name,
+            namespace,
+            tags_hash,
+            BorrowedTags { matches, make },
+            value,
+        );
+    }
+
+    #[inline]
+    fn record_gauge_with_tags<T: RecordTags>(
+        &self,
+        name: MetricName,
+        namespace: &'static [&'static str],
+        tags_hash: u64,
+        tags: T,
         value: f64,
     ) {
         let combined = combine_hash(name.hash(), tags_hash);
-        let metric_name = name.as_str();
-        let stripe_idx = combined as usize & STRIPE_MASK;
-        let mut guard = self.stripes[stripe_idx].lock();
-
-        let entry = guard.entry(SeriesKey {
+        let query = SeriesLookup {
             fingerprint: combined,
             namespace,
-            metric_name,
+            metric_name: name.as_str(),
             tags_hash,
             kind: MetricKind::Gauge,
-        });
-
-        match entry {
-            hashbrown::hash_map::Entry::Occupied(e) => {
-                if let AggSlot::Gauge(ref slot) = e.get().1 {
-                    slot.record(value);
-                }
-            }
-            hashbrown::hash_map::Entry::Vacant(e) => {
-                let slot = GaugeSlot::new();
-                slot.record(value);
-                let key = AggKey {
-                    namespace,
-                    metric_name,
-                    tags_data: Arc::new(TagsData { pairs: make_tags() }),
-                };
-                e.insert((key, AggSlot::Gauge(slot)));
-            }
+            tags: &tags,
+        };
+        let mut guard = self.stripes[combined as usize & STRIPE_MASK].lock();
+        if let Some(AggSlot::Gauge(slot)) = guard.get_mut(&query) {
+            slot.record(value);
+        } else {
+            let slot = GaugeSlot::new();
+            slot.record(value);
+            let key = SeriesKey::new(
+                name,
+                namespace,
+                tags_hash,
+                MetricKind::Gauge,
+                tags.into_pairs(),
+            );
+            guard.insert(key, AggSlot::Gauge(slot));
         }
     }
 
+    /// Record a histogram, materializing tags on every call to compare full identity.
+    /// Macro-generated metrics use a borrowed comparison on cache hits instead.
     #[inline]
     pub fn record_histogram(
         &self,
         metric_name: &'static str,
         namespace: &'static [&'static str],
         tags_hash: u64,
-        make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
+        make_tags: impl FnOnce() -> TagPairs,
         value: f64,
     ) {
         self.record_histogram_named(
@@ -241,46 +371,80 @@ impl StripedAggMap {
         name: MetricName,
         namespace: &'static [&'static str],
         tags_hash: u64,
-        make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
+        make_tags: impl FnOnce() -> TagPairs,
+        value: f64,
+    ) {
+        self.record_histogram_with_tags(name, namespace, tags_hash, make_tags(), value);
+    }
+
+    #[inline]
+    pub(crate) fn record_histogram_matched(
+        &self,
+        name: MetricName,
+        namespace: &'static [&'static str],
+        tags_hash: u64,
+        matches: impl Fn(&[(&'static str, std::borrow::Cow<'static, str>)]) -> bool,
+        make: impl FnOnce() -> TagPairs,
+        value: f64,
+    ) {
+        self.record_histogram_with_tags(
+            name,
+            namespace,
+            tags_hash,
+            BorrowedTags { matches, make },
+            value,
+        );
+    }
+
+    #[inline]
+    fn record_histogram_with_tags<T: RecordTags>(
+        &self,
+        name: MetricName,
+        namespace: &'static [&'static str],
+        tags_hash: u64,
+        tags: T,
         value: f64,
     ) {
         let combined = combine_hash(name.hash(), tags_hash);
-        let metric_name = name.as_str();
-        let stripe_idx = combined as usize & STRIPE_MASK;
-        let mut guard = self.stripes[stripe_idx].lock();
-        let (key, slot) = guard
-            .entry(SeriesKey {
-                fingerprint: combined,
+        let query = SeriesLookup {
+            fingerprint: combined,
+            namespace,
+            metric_name: name.as_str(),
+            tags_hash,
+            kind: MetricKind::Histogram,
+            tags: &tags,
+        };
+        let mut guard = self.stripes[combined as usize & STRIPE_MASK].lock();
+        let raw_tags = if let Some((key, slot)) = guard.get_key_value_mut(&query) {
+            if let AggSlot::Histogram(slot) = slot {
+                slot.record(value);
+            }
+            self.raw_sender.as_ref().map(|_| Arc::clone(&key.tags_data))
+        } else {
+            let slot = if self.aggregate_histograms {
+                let slot = HistogramSlot::new(self.max_buckets, self.initial_error);
+                slot.record(value);
+                AggSlot::Histogram(slot)
+            } else {
+                AggSlot::RawDistribution
+            };
+            let key = SeriesKey::new(
+                name,
                 namespace,
-                metric_name,
                 tags_hash,
-                kind: MetricKind::Histogram,
-            })
-            .or_insert_with(|| {
-                let slot = if self.aggregate_histograms {
-                    AggSlot::Histogram(HistogramSlot::new(self.max_buckets, self.initial_error))
-                } else {
-                    AggSlot::RawDistribution
-                };
-                (
-                    AggKey {
-                        namespace,
-                        metric_name,
-                        tags_data: Arc::new(TagsData { pairs: make_tags() }),
-                    },
-                    slot,
-                )
-            });
-        if let AggSlot::Histogram(slot) = slot {
-            slot.record(value);
-        }
-        let tags = self.raw_sender.as_ref().map(|_| Arc::clone(&key.tags_data));
+                MetricKind::Histogram,
+                tags.into_pairs(),
+            );
+            let raw_tags = self.raw_sender.as_ref().map(|_| Arc::clone(&key.tags_data));
+            guard.insert(key, slot);
+            raw_tags
+        };
         drop(guard);
-        if let (Some(sender), Some(tags)) = (&self.raw_sender, tags)
+        if let (Some(sender), Some(tags)) = (&self.raw_sender, raw_tags)
             && sender
                 .try_send(RawDistributionPoint {
                     namespace,
-                    metric_name,
+                    metric_name: name.as_str(),
                     tags,
                     value,
                 })
@@ -299,7 +463,7 @@ impl StripedAggMap {
 
         for stripe in self.stripes.iter() {
             let mut guard = stripe.lock();
-            guard.retain(|_combined, (key, slot)| match slot {
+            guard.retain(|key, slot| match slot {
                 AggSlot::RawDistribution => false,
                 AggSlot::Count(count_slot) => {
                     let value = count_slot.flush();
@@ -341,7 +505,7 @@ impl StripedAggMap {
     }
 }
 
-/// Placement hint only: full series identity is compared by HashMap::entry.
+/// Placement hint only: lookup compares the full series identity, including tags.
 /// Equal metric names must select the same stripe even at different addresses.
 #[inline]
 fn combine_hash(name_hash: u64, tags_hash: u64) -> u64 {
@@ -524,13 +688,51 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_matches_keep_cached_tags_without_merging_collisions() {
+        let map = make_map();
+        for series in 0..9 {
+            let tenant = series.to_string();
+            let matches = |pairs: &[(&'static str, std::borrow::Cow<'static, str>)]| {
+                pairs.len() == 1 && pairs[0].0 == "tenant" && pairs[0].1 == tenant
+            };
+            let make = || vec![("tenant", tenant.clone().into())];
+            map.record_count_matched(MetricName::new("count"), &[], 42, matches, make, 1);
+            map.record_gauge_matched(MetricName::new("gauge"), &[], 42, matches, make, 1.0);
+            map.record_histogram_matched(MetricName::new("histogram"), &[], 42, matches, make, 1.0);
+            let cached = || panic!("borrowed matching does not rebuild cached tags");
+            map.record_count_matched(MetricName::new("count"), &[], 42, matches, cached, 2);
+            map.record_gauge_matched(MetricName::new("gauge"), &[], 42, matches, cached, 2.0);
+            map.record_histogram_matched(
+                MetricName::new("histogram"),
+                &[],
+                42,
+                matches,
+                cached,
+                2.0,
+            );
+        }
+        let flushed = map.flush();
+        assert_eq!(flushed.len(), 27);
+        for metric in flushed {
+            match metric.value {
+                FlushedValue::Count(value) => assert_eq!(value, 3),
+                FlushedValue::Gauge(value) => assert_eq!(value, 2.0),
+                FlushedValue::Histogram(sketch) => {
+                    assert_eq!(sketch.count(), 2);
+                    assert_eq!(sketch.sum(), 3.0);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn metric_names_compare_by_content() {
         let map = make_map();
         let first = Box::leak(String::from("same_name").into_boxed_str());
         let second = Box::leak(String::from("same_name").into_boxed_str());
         assert_ne!(first.as_ptr(), second.as_ptr());
         map.record_count(first, &[], 42, Vec::new, 1);
-        map.record_count(second, &[], 42, || panic!("tags already cached"), 99);
+        map.record_count(second, &[], 42, Vec::new, 99);
         let flushed = map.flush();
         assert_eq!(flushed.len(), 1);
         assert!(matches!(flushed[0].value, FlushedValue::Count(100)));
@@ -549,7 +751,7 @@ mod tests {
         }
         assert!(map.stripes.iter().any(|stripe| stripe.lock().len() == 1536));
         for series in 0..512 {
-            let cached = || panic!("precomputed and runtime names must share cached tags");
+            let cached = Vec::new;
             map.record_count(other_name, &[], series * 64, cached, 99);
             map.record_gauge(other_name, &[], series * 64, cached, 99.0);
             map.record_histogram(other_name, &[], series * 64, cached, 99.0);
@@ -599,7 +801,7 @@ mod tests {
     fn test_insert_and_record_count() {
         let map = make_map();
         map.record_count("test_count", &[], 123, || vec![("k", "v".into())], 5);
-        map.record_count("test_count", &[], 123, || panic!("should not call"), 3);
+        map.record_count("test_count", &[], 123, || vec![("k", "v".into())], 3);
 
         let flushed = map.flush();
         assert_eq!(flushed.len(), 1);
@@ -625,7 +827,7 @@ mod tests {
     fn test_insert_and_record_gauge() {
         let map = make_map();
         map.record_gauge("test_gauge", &[], 456, Vec::new, 10.0);
-        map.record_gauge("test_gauge", &[], 456, || panic!("should not call"), 20.0);
+        map.record_gauge("test_gauge", &[], 456, Vec::new, 20.0);
 
         let flushed = map.flush();
         assert_eq!(flushed.len(), 1);
@@ -639,7 +841,7 @@ mod tests {
     fn test_insert_and_record_histogram() {
         let map = make_map();
         map.record_histogram("test_hist", &[], 789, Vec::new, 42.0);
-        map.record_histogram("test_hist", &[], 789, || panic!("should not call"), 43.0);
+        map.record_histogram("test_hist", &[], 789, Vec::new, 43.0);
 
         let flushed = map.flush();
         assert_eq!(flushed.len(), 1);
@@ -680,7 +882,7 @@ mod tests {
 
         // Raw-only entries cache tags but do not allocate histogram sketches.
         map.record_histogram("test_hist", &[], 789, || vec![("k", "v".into())], 1.0);
-        map.record_histogram("test_hist", &[], 789, || panic!("tags cached"), 2.0);
+        map.record_histogram("test_hist", &[], 789, || vec![("k", "v".into())], 2.0);
 
         // The sketch is bypassed entirely in passthrough mode, so flush() has nothing to emit.
         let flushed = map.flush();

@@ -47,7 +47,7 @@ fn generated_and_existing_recording_apis_share_series() {
     // Empty generated structs hash no fields. The existing string API must use
     // the same series as the compile-time descriptor emitted by the macro.
     let tags_hash = std::collections::hash_map::DefaultHasher::new().finish();
-    let cached = || panic!("generated and string paths must share cached tags");
+    let cached = Vec::new;
     client::record_count(Count::NAME, &[], tags_hash, cached, 99);
     client::record_gauge(Gauge::NAME, &[], tags_hash, cached, 99.0);
     client::record_histogram(Histogram::NAME, &[], tags_hash, cached, 99.0);

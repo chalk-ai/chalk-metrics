@@ -151,6 +151,10 @@ fn expand_tags(input: TagsInput, python_bindings: bool) -> TokenStream2 {
                 impl chalk_metrics::__private::MetricTag for #ident {
                     const EXPORT_NAME: &'static str = #export_name;
 
+                    fn matches_value(&self, value: &str) -> bool {
+                        self.as_str() == value
+                    }
+
                     fn export_value(&self) -> ::std::borrow::Cow<'static, str> {
                         ::std::borrow::Cow::Borrowed(self.as_str())
                     }
@@ -215,6 +219,10 @@ fn expand_tags(input: TagsInput, python_bindings: bool) -> TokenStream2 {
 
                 impl chalk_metrics::__private::MetricTag for #ident {
                     const EXPORT_NAME: &'static str = #export_name;
+
+                    fn matches_value(&self, value: &str) -> bool {
+                        self.as_str() == value
+                    }
 
                     fn export_value(&self) -> ::std::borrow::Cow<'static, str> {
                         ::std::borrow::Cow::Owned(self.to_string())
@@ -498,6 +506,7 @@ fn expand_metric(
     let mut constructor_args = Vec::new();
     let mut constructor_fields = Vec::new();
     let mut export_pairs = Vec::new();
+    let mut match_pairs = Vec::new();
     for tag in tags {
         let ty = &tag.ty;
         let field = tag.alias.clone().unwrap_or_else(|| default_field_ident(ty));
@@ -509,7 +518,20 @@ fn expand_metric(
             quote! { <#ty as chalk_metrics::__private::MetricTag>::EXPORT_NAME }
         };
 
+        let compare_pair = quote! {
+            if !pairs.next().is_some_and(|(key, stored)| {
+                *key == #export_key
+                    && <#ty as chalk_metrics::__private::MetricTag>::matches_value(value, stored.as_ref())
+            }) {
+                return false;
+            }
+        };
         if tag.optional {
+            match_pairs.push(quote! {
+                if let Some(ref value) = self.#field {
+                    #compare_pair
+                }
+            });
             fields.push(quote! { pub #field: Option<#ty>, });
             constructor_args.push(quote! { #field: Option<#ty> });
             export_pairs.push(quote! {
@@ -521,6 +543,10 @@ fn expand_metric(
                 }
             });
         } else {
+            match_pairs.push(quote! {
+                let value = &self.#field;
+                #compare_pair
+            });
             fields.push(quote! { pub #field: #ty, });
             constructor_args.push(quote! { #field: #ty });
             export_pairs.push(quote! {
@@ -543,10 +569,11 @@ fn expand_metric(
             /// Record a count delta.
             pub fn record_value(&self, value: i64) {
                 let hash = self.tags_hash();
-                chalk_metrics::client::record_count_named(
+                chalk_metrics::client::record_count_matched(
                     Self::METRIC_NAME,
                     Self::namespace(),
                     hash,
+                    |pairs| self.matches_pairs(pairs),
                     || self.export_pairs(),
                     value,
                 );
@@ -556,10 +583,11 @@ fn expand_metric(
             /// Record a gauge value.
             pub fn record(&self, value: f64) {
                 let hash = self.tags_hash();
-                chalk_metrics::client::record_gauge_named(
+                chalk_metrics::client::record_gauge_matched(
                     Self::METRIC_NAME,
                     Self::namespace(),
                     hash,
+                    |pairs| self.matches_pairs(pairs),
                     || self.export_pairs(),
                     value,
                 );
@@ -569,10 +597,11 @@ fn expand_metric(
             /// Record a histogram observation.
             pub fn record(&self, value: f64) {
                 let hash = self.tags_hash();
-                chalk_metrics::client::record_histogram_named(
+                chalk_metrics::client::record_histogram_matched(
                     Self::METRIC_NAME,
                     Self::namespace(),
                     hash,
+                    |pairs| self.matches_pairs(pairs),
                     || self.export_pairs(),
                     value,
                 );
@@ -647,6 +676,13 @@ fn expand_metric(
                 let mut pairs = Vec::new();
                 #( #export_pairs )*
                 pairs
+            }
+
+            #[inline]
+            fn matches_pairs(&self, pairs: &[(&'static str, ::std::borrow::Cow<'static, str>)]) -> bool {
+                let mut pairs = pairs.iter();
+                #( #match_pairs )*
+                pairs.next().is_none()
             }
 
             #[inline]
