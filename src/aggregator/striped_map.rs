@@ -143,6 +143,7 @@ impl StripedAggMap {
         let metric_name = name.as_str();
         let stripe_idx = combined as usize & STRIPE_MASK;
         let mut guard = self.stripes[stripe_idx].lock();
+        let map = &mut *guard;
         let key = SeriesKey {
             fingerprint: combined,
             namespace,
@@ -151,30 +152,14 @@ impl StripedAggMap {
             kind: MetricKind::Count,
             probe: 0,
         };
-
-        match guard.entry(key) {
-            hashbrown::hash_map::Entry::Occupied(e) => {
-                if tags_match(&e.get().0.tags_data.pairs) {
-                    if let AggSlot::Count(ref slot) = e.get().1 {
-                        slot.record(delta);
-                    }
-                    return;
-                }
+        let series = match map.get(&key) {
+            Some(series) if tags_match(&series.0.tags_data.pairs) => series,
+            found => {
+                let colliding = found.is_some();
+                self.new_series(map, key, make_tags(), colliding)
             }
-            hashbrown::hash_map::Entry::Vacant(e) => {
-                let slot = CountSlot::new();
-                slot.record(delta);
-                let key = AggKey {
-                    namespace,
-                    metric_name,
-                    tags_data: Arc::new(TagsData { pairs: make_tags() }),
-                };
-                e.insert((key, AggSlot::Count(slot)));
-                return;
-            }
-        }
-        let (_, slot) = self.colliding_series(&mut guard, key, make_tags());
-        if let AggSlot::Count(slot) = slot {
+        };
+        if let AggSlot::Count(slot) = &series.1 {
             slot.record(delta);
         }
     }
@@ -212,6 +197,7 @@ impl StripedAggMap {
         let metric_name = name.as_str();
         let stripe_idx = combined as usize & STRIPE_MASK;
         let mut guard = self.stripes[stripe_idx].lock();
+        let map = &mut *guard;
         let key = SeriesKey {
             fingerprint: combined,
             namespace,
@@ -220,30 +206,14 @@ impl StripedAggMap {
             kind: MetricKind::Gauge,
             probe: 0,
         };
-
-        match guard.entry(key) {
-            hashbrown::hash_map::Entry::Occupied(e) => {
-                if tags_match(&e.get().0.tags_data.pairs) {
-                    if let AggSlot::Gauge(ref slot) = e.get().1 {
-                        slot.record(value);
-                    }
-                    return;
-                }
+        let series = match map.get(&key) {
+            Some(series) if tags_match(&series.0.tags_data.pairs) => series,
+            found => {
+                let colliding = found.is_some();
+                self.new_series(map, key, make_tags(), colliding)
             }
-            hashbrown::hash_map::Entry::Vacant(e) => {
-                let slot = GaugeSlot::new();
-                slot.record(value);
-                let key = AggKey {
-                    namespace,
-                    metric_name,
-                    tags_data: Arc::new(TagsData { pairs: make_tags() }),
-                };
-                e.insert((key, AggSlot::Gauge(slot)));
-                return;
-            }
-        }
-        let (_, slot) = self.colliding_series(&mut guard, key, make_tags());
-        if let AggSlot::Gauge(slot) = slot {
+        };
+        if let AggSlot::Gauge(slot) = &series.1 {
             slot.record(value);
         }
     }
@@ -281,6 +251,7 @@ impl StripedAggMap {
         let metric_name = name.as_str();
         let stripe_idx = combined as usize & STRIPE_MASK;
         let mut guard = self.stripes[stripe_idx].lock();
+        let map = &mut *guard;
         let key = SeriesKey {
             fingerprint: combined,
             namespace,
@@ -289,57 +260,21 @@ impl StripedAggMap {
             kind: MetricKind::Histogram,
             probe: 0,
         };
-        // Used by exactly one of the arms below; the compiler cannot see that.
-        let mut make_tags = Some(make_tags);
-        let (hit, tags) = match guard.entry(key) {
-            hashbrown::hash_map::Entry::Occupied(e) => {
-                let (stored, slot) = e.get();
-                if tags_match(&stored.tags_data.pairs) {
-                    if let AggSlot::Histogram(slot) = slot {
-                        slot.record(value);
-                    }
-                    let tags = self
-                        .raw_sender
-                        .as_ref()
-                        .map(|_| Arc::clone(&stored.tags_data));
-                    (true, tags)
-                } else {
-                    (false, None)
-                }
-            }
-            hashbrown::hash_map::Entry::Vacant(e) => {
-                let (stored, slot) = e.insert((
-                    AggKey {
-                        namespace,
-                        metric_name,
-                        tags_data: Arc::new(TagsData {
-                            pairs: make_tags.take().unwrap()(),
-                        }),
-                    },
-                    self.new_slot(MetricKind::Histogram),
-                ));
-                if let AggSlot::Histogram(slot) = slot {
-                    slot.record(value);
-                }
-                let tags = self
-                    .raw_sender
-                    .as_ref()
-                    .map(|_| Arc::clone(&stored.tags_data));
-                (true, tags)
+        let series = match map.get(&key) {
+            Some(series) if tags_match(&series.0.tags_data.pairs) => series,
+            found => {
+                let colliding = found.is_some();
+                self.new_series(map, key, make_tags(), colliding)
             }
         };
-        let tags = if hit {
-            tags
-        } else {
-            let (stored, slot) =
-                self.colliding_series(&mut guard, key, make_tags.take().unwrap()());
-            if let AggSlot::Histogram(slot) = slot {
-                slot.record(value);
-            }
-            self.raw_sender
-                .as_ref()
-                .map(|_| Arc::clone(&stored.tags_data))
-        };
+        let (stored, slot) = series;
+        if let AggSlot::Histogram(slot) = slot {
+            slot.record(value);
+        }
+        let tags = self
+            .raw_sender
+            .as_ref()
+            .map(|_| Arc::clone(&stored.tags_data));
         drop(guard);
         if let (Some(sender), Some(tags)) = (&self.raw_sender, tags)
             && sender
@@ -355,28 +290,31 @@ impl StripedAggMap {
         }
     }
 
-    /// Cold path of the `record_*_named` functions: probe 0 of `key` holds a
-    /// different tag set (a tag-hash collision), so find or create this tag
-    /// set's series at the next probes and return it. Counts the collision once.
-    /// If all `MAX_COLLIDING_SERIES` probes hold other tag sets, the last one is
-    /// returned. The caller passes the tags eagerly, so recording into a
-    /// colliding series builds its tags every time. Not generic, so it is
-    /// compiled once rather than once per metric.
-    #[cold]
+    /// Finds or creates the series of `key` when probe 0 is not a hit: it is
+    /// either vacant or (`colliding`) holds a different tag set, a tag-hash
+    /// collision. A collision is counted once and the search moves on to the
+    /// next probes; if all `MAX_COLLIDING_SERIES` probes hold other tag sets, the
+    /// last one is returned. `pairs` are the caller's tags: a new series needs
+    /// them anyway, and a recording into an existing colliding series builds
+    /// them each time. Not generic, so it is compiled once rather than once per
+    /// metric, which keeps series creation out of the generated recording code.
     #[inline(never)]
-    fn colliding_series<'a>(
+    fn new_series<'a>(
         &self,
         map: &'a mut HashMap<SeriesKey, (AggKey, AggSlot)>,
         mut key: SeriesKey,
         pairs: Vec<(&'static str, std::borrow::Cow<'static, str>)>,
+        colliding: bool,
     ) -> &'a (AggKey, AggSlot) {
-        self.tag_hash_collisions.fetch_add(1, Ordering::Relaxed);
-        for probe in 1..MAX_COLLIDING_SERIES {
-            key.probe = probe;
-            match map.get(&key) {
-                Some((stored, _))
-                    if probe + 1 < MAX_COLLIDING_SERIES && stored.tags_data.pairs != pairs => {}
-                _ => break,
+        if colliding {
+            self.tag_hash_collisions.fetch_add(1, Ordering::Relaxed);
+            for probe in 1..MAX_COLLIDING_SERIES {
+                key.probe = probe;
+                match map.get(&key) {
+                    Some((stored, _))
+                        if probe + 1 < MAX_COLLIDING_SERIES && stored.tags_data.pairs != pairs => {}
+                    _ => break,
+                }
             }
         }
         map.entry(key).or_insert_with(|| {
