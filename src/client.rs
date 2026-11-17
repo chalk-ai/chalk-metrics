@@ -272,6 +272,7 @@ extern "C" fn atexit_handler() {
 // ── Recording API ──────────────────────────────────────────────────────
 
 /// Record a count delta. No-op if the client is not initialized.
+/// `make_tags` runs on every initialized call to compare tag values on hash matches.
 #[inline]
 pub fn record_count(
     metric_name: &'static str,
@@ -289,7 +290,8 @@ pub fn record_count(
     );
 }
 
-/// Recording support for macro-generated metrics with compile-time name fingerprints.
+/// Compatibility recording support with compile-time name fingerprints.
+/// `make_tags` runs on every initialized call to verify tag identity.
 #[doc(hidden)]
 #[inline]
 pub fn record_count_named(
@@ -307,6 +309,7 @@ pub fn record_count_named(
 }
 
 /// Record a gauge value. No-op if the client is not initialized.
+/// `make_tags` runs on every initialized call to compare tag values on hash matches.
 #[inline]
 pub fn record_gauge(
     metric_name: &'static str,
@@ -324,7 +327,8 @@ pub fn record_gauge(
     );
 }
 
-/// Recording support for macro-generated metrics with compile-time name fingerprints.
+/// Compatibility recording support with compile-time name fingerprints.
+/// `make_tags` runs on every initialized call to verify tag identity.
 #[doc(hidden)]
 #[inline]
 pub fn record_gauge_named(
@@ -342,6 +346,7 @@ pub fn record_gauge_named(
 }
 
 /// Record a histogram value. No-op if the client is not initialized.
+/// `make_tags` runs on every initialized call to compare tag values on hash matches.
 #[inline]
 pub fn record_histogram(
     metric_name: &'static str,
@@ -359,7 +364,8 @@ pub fn record_histogram(
     );
 }
 
-/// Recording support for macro-generated metrics with compile-time name fingerprints.
+/// Compatibility recording support with compile-time name fingerprints.
+/// `make_tags` runs on every initialized call to verify tag identity.
 #[doc(hidden)]
 #[inline]
 pub fn record_histogram_named(
@@ -376,9 +382,67 @@ pub fn record_histogram_named(
     }
 }
 
+/// Recording support for generated metrics with allocation-free borrowed tag comparisons.
+/// `matches` must compare all exported tag keys and values against the supplied slice.
+#[doc(hidden)]
+#[inline]
+pub fn record_count_matched(
+    name: MetricName,
+    namespace: &'static [&'static str],
+    tags_hash: u64,
+    matches: impl Fn(&[(&'static str, std::borrow::Cow<'static, str>)]) -> bool,
+    make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
+    delta: i64,
+) {
+    if let Some(client) = GLOBAL.get() {
+        client
+            .aggregator
+            .record_count_matched(name, namespace, tags_hash, matches, make_tags, delta);
+    }
+}
+
+/// Recording support for generated metrics with allocation-free borrowed tag comparisons.
+/// `matches` must compare all exported tag keys and values against the supplied slice.
+#[doc(hidden)]
+#[inline]
+pub fn record_gauge_matched(
+    name: MetricName,
+    namespace: &'static [&'static str],
+    tags_hash: u64,
+    matches: impl Fn(&[(&'static str, std::borrow::Cow<'static, str>)]) -> bool,
+    make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
+    value: f64,
+) {
+    if let Some(client) = GLOBAL.get() {
+        client
+            .aggregator
+            .record_gauge_matched(name, namespace, tags_hash, matches, make_tags, value);
+    }
+}
+
+/// Recording support for generated metrics with allocation-free borrowed tag comparisons.
+/// `matches` must compare all exported tag keys and values against the supplied slice.
+#[doc(hidden)]
+#[inline]
+pub fn record_histogram_matched(
+    name: MetricName,
+    namespace: &'static [&'static str],
+    tags_hash: u64,
+    matches: impl Fn(&[(&'static str, std::borrow::Cow<'static, str>)]) -> bool,
+    make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
+    value: f64,
+) {
+    if let Some(client) = GLOBAL.get() {
+        client
+            .aggregator
+            .record_histogram_matched(name, namespace, tags_hash, matches, make_tags, value);
+    }
+}
+
 // ── Local client recording API (for testing) ───────────────────────────
 
 impl MetricsClient {
+    /// Record using fully materialized tags; `make_tags` runs on every call.
     pub fn record_count(
         &self,
         metric_name: &'static str,
@@ -391,6 +455,7 @@ impl MetricsClient {
             .record_count(metric_name, namespace, tags_hash, make_tags, delta);
     }
 
+    /// Record using fully materialized tags; `make_tags` runs on every call.
     pub fn record_gauge(
         &self,
         metric_name: &'static str,
@@ -403,6 +468,7 @@ impl MetricsClient {
             .record_gauge(metric_name, namespace, tags_hash, make_tags, value);
     }
 
+    /// Record using fully materialized tags; `make_tags` runs on every call.
     pub fn record_histogram(
         &self,
         metric_name: &'static str,

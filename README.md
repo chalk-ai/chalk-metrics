@@ -453,6 +453,12 @@ an exporter callback. Local clients require explicit shutdown. The global client
 also registers an `atexit` handler, but abrupt termination, signals, and process
 aborts can bypass it. Recording after shutdown is unsupported.
 
+Series identity includes the namespace, metric name, kind, and exported tag
+pairs. Hash collisions do not merge distinct tag sets. Generated metrics compare
+tag values without allocating on cache hits. The low-level `client::record_*`
+closure APIs evaluate `make_tags` on every initialized recording call so they
+can compare the full tag set; prefer generated metrics on hot paths.
+
 Tenant identity, required service tags, and service-specific tag validation
 remain the consumer's responsibility; the shared client does not infer them.
 

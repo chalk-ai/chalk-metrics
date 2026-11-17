@@ -42,8 +42,9 @@ Guidance for coding agents working in this repository.
 - Associated const `NAME` and method `namespace()` provide metric identity
 
 ### Aggregation
-- `src/aggregator/striped_map.rs` — 64-stripe concurrent map using `parking_lot::Mutex` and the `hashbrown` `Entry` API
-- Uses `&'static str` pointer address for metric identity hashing (no u16 discriminant)
+- `src/aggregator/striped_map.rs` — 64-stripe concurrent map using `parking_lot::Mutex` and `hashbrown` with borrowed lookups
+- Hashes metric name contents; compares namespace, name, kind, and actual tag pairs on hash matches
+- Generated recording compares borrowed tags on hits; low-level closure APIs materialize tags on every call
 - `src/aggregator/count.rs` — lock-free `AtomicI64` (swap-to-zero on flush)
 - `src/aggregator/gauge.rs` — lock-free `AtomicU64` storing f64 as bits (persists across flushes)
 - `src/aggregator/sketch.rs` — UDD Sketch for approximate quantiles (from Timescale, Apache 2.0)
