@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.6](https://github.com/chalk-ai/chalk-metrics/compare/v0.0.5...v0.0.6) - 2026-11-17
+
+### Fixed
+
+- compare actual tags when series hashes collide
+- stop replaying idle gauge values after flush
+
+### Other
+
+- Merge pull request #22 from chalk-ai/je/cha-12486-expire-gauges
+- reproduce colliding tag hashes merging metric series
+- reproduce stale gauge emission and retention (CHA-12486)
+
 ## [0.0.5](https://github.com/chalk-ai/chalk-metrics/compare/v0.0.4...v0.0.5) - 2026-11-17
 
 ### Fixed
