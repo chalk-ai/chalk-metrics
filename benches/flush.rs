@@ -1,8 +1,8 @@
 //! Cost of `MetricsClient::flush()` and what it does to recording threads.
 //!
 //! `flush()` walks all 64 stripes and holds each stripe's lock while it drains
-//! that stripe. It removes count and histogram entries (gauges persist), so the
-//! next record of each of those series has to register it again. Three parts:
+//! that stripe. It removes count, gauge, and histogram entries, so the next
+//! record of each series has to register it again. Three parts:
 //!
 //! 1. Criterion group `flush`: one `flush()` call over 1,000, 10,000 and
 //!    100,000 series of one kind (count, gauge or histogram). Only the call is

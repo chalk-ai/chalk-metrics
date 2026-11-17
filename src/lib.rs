@@ -9,6 +9,8 @@
 //! low overhead and cached tag data. Each
 //! metric is a struct with a `.record()` method that enforces the correct
 //! value type at compile time.
+//! Gauges export the latest value recorded since the previous flush and stop
+//! exporting when recording stops.
 //!
 //! ## Quick Start
 //!

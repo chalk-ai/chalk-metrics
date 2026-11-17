@@ -45,7 +45,7 @@ Guidance for coding agents working in this repository.
 - `src/aggregator/striped_map.rs` — 64-stripe concurrent map using `parking_lot::Mutex` and the `hashbrown` `Entry` API
 - Uses `&'static str` pointer address for metric identity hashing (no u16 discriminant)
 - `src/aggregator/count.rs` — lock-free `AtomicI64` (swap-to-zero on flush)
-- `src/aggregator/gauge.rs` — lock-free `AtomicU64` storing f64 as bits (persists across flushes)
+- `src/aggregator/gauge.rs` — lock-free `AtomicU64` storing f64 as bits (consumed on flush)
 - `src/aggregator/sketch.rs` — UDD Sketch for approximate quantiles (from Timescale, Apache 2.0)
 - `src/aggregator/histogram.rs` — `parking_lot::Mutex<UDDSketch>` (clone-and-reset on flush)
 
@@ -64,6 +64,6 @@ Guidance for coding agents working in this repository.
 - Aliased tags use the alias identifier as both the struct field name and export key for that metric
 
 ### Flush Behavior
-- Counts and histograms are drained from the map on flush
-- Gauges persist across flushes
+- Counts, gauges, and histograms are drained from the map on flush
+- Gauges export the latest value recorded since the previous flush
 - Tags data is `Arc`-shared — flush does a cheap pointer bump, no string copies

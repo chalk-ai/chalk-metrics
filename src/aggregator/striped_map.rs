@@ -320,7 +320,9 @@ impl StripedAggMap {
                             value: FlushedValue::Gauge(value),
                         });
                     }
-                    true
+                    // Records hold this stripe lock too, so removing the slot
+                    // cannot discard a write made after this flush.
+                    false
                 }
                 AggSlot::Histogram(hist_slot) => {
                     let sketch = hist_slot.flush();

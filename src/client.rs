@@ -76,6 +76,7 @@ impl MetricsClientBuilder {
     }
 
     /// Set the counter, gauge, and sketch flush interval (default: 10 seconds).
+    /// Gauges export only when recorded since the previous flush.
     /// Raw observations use `raw_sample_flush_interval` independently.
     pub fn flush_interval(mut self, interval: Duration) -> Self {
         assert!(!interval.is_zero(), "flush interval must be positive");

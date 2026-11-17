@@ -29,7 +29,8 @@ Growth records 512 tag combinations into one stripe, then revisits each one:
 1,024 recording calls per iteration. Startup, flush, and shutdown are excluded.
 The baseline growth regressions produce 1,023–1,024 flushed entries instead of
 512; corrected entries each contain counter total 100, gauge 99, or histogram
-count 2 and sum 100. Gauges persist across flushes; counters and histograms reset.
+count 2 and sum 100. At these measured revisions, gauges persisted across flushes;
+current gauges are consumed on flush along with counters and histograms.
 The baseline performs incorrect duplicate allocations, so growth timing changes
 must be read alongside correctness, not as equivalent-work speedups.
 
