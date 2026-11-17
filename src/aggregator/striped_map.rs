@@ -424,6 +424,105 @@ mod tests {
         assert_eq!(map.flush().len(), 2);
     }
 
+    // CHA-12487: a tag hash selects a bucket, not a series identity. Force
+    // collisions rather than depending on the probability of a natural one.
+    // Nine series also catches implementations that merge an overflow bucket
+    // after allowing a small fixed number of collisions.
+    fn check_colliding_tag_hashes(kind: u8) {
+        let map = make_map();
+        for round in [1, 10] {
+            for series in 0..9 {
+                let tags = || vec![("tenant", series.to_string().into())];
+                let value = (series + 1) * round;
+                match kind {
+                    0 => map.record_count("poll_result", &["bloom_filters"], 42, tags, value),
+                    1 => {
+                        map.record_gauge("poll_result", &["bloom_filters"], 42, tags, value as f64)
+                    }
+                    _ => map.record_histogram(
+                        "poll_result",
+                        &["bloom_filters"],
+                        42,
+                        tags,
+                        value as f64,
+                    ),
+                }
+            }
+        }
+
+        let mut metrics = map.flush();
+        assert_eq!(
+            metrics.len(),
+            9,
+            "each colliding tag set needs its own series"
+        );
+        metrics.sort_by(|a, b| a.tags.pairs.cmp(&b.tags.pairs));
+        for (series, metric) in metrics.iter().enumerate() {
+            assert_eq!(metric.namespace, &["bloom_filters"]);
+            assert_eq!(
+                metric.tags.pairs,
+                vec![("tenant", series.to_string().into())]
+            );
+            let value = (series + 1) as f64;
+            match &metric.value {
+                FlushedValue::Count(count) => assert_eq!(*count, (value * 11.0) as i64),
+                FlushedValue::Gauge(gauge) => assert_eq!(*gauge, value * 10.0),
+                FlushedValue::Histogram(sketch) => {
+                    assert_eq!(sketch.count(), 2);
+                    assert_eq!(sketch.sum(), value * 11.0);
+                    assert_eq!(sketch.min(), value);
+                    assert_eq!(sketch.max(), value * 10.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn colliding_tag_hashes_preserve_counts() {
+        check_colliding_tag_hashes(0);
+    }
+
+    #[test]
+    fn colliding_tag_hashes_preserve_gauges() {
+        check_colliding_tag_hashes(1);
+    }
+
+    #[test]
+    fn colliding_tag_hashes_preserve_histogram_samples() {
+        check_colliding_tag_hashes(2);
+    }
+
+    #[test]
+    fn colliding_tag_hashes_preserve_raw_distribution_tags() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(32);
+        let map = StripedAggMap::new(200, 0.001, Some(sender));
+        for series in 0..9 {
+            for round in [1, 10] {
+                map.record_histogram(
+                    "latency",
+                    &["bloom_filters"],
+                    42,
+                    || vec![("tenant", series.to_string().into())],
+                    ((series + 1) * round) as f64,
+                );
+            }
+        }
+
+        for series in 0..9 {
+            for round in [1, 10] {
+                let point = receiver.try_recv().expect("every observation is delivered");
+                assert_eq!(
+                    point.tags.pairs,
+                    vec![("tenant", series.to_string().into())]
+                );
+                assert_eq!(point.value, ((series + 1) * round) as f64);
+            }
+        }
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(map.dropped_raw_samples(), 0);
+        assert!(map.flush().is_empty());
+    }
+
     #[test]
     fn metric_names_compare_by_content() {
         let map = make_map();
