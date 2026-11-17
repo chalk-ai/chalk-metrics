@@ -919,6 +919,26 @@ mod tests {
         assert_eq!(series_of(&flushed, "b", "count"), 8000.0);
     }
 
+    #[test]
+    fn a_new_series_is_not_compared_and_a_hit_is_compared_once() {
+        let map = make_map();
+        let calls = std::cell::Cell::new(0u32);
+        let counted = |pairs: &[(&'static str, std::borrow::Cow<'static, str>)]| {
+            calls.set(calls.get() + 1);
+            matches("a")(pairs)
+        };
+        map.record_count_named(COLLIDE, &[], 7, tags_of("a"), counted, 1);
+        map.record_gauge_named(COLLIDE, &[], 7, tags_of("a"), counted, 1.0);
+        map.record_histogram_named(COLLIDE, &[], 7, tags_of("a"), counted, 1.0);
+        assert_eq!(calls.get(), 0, "a new series is not compared");
+
+        map.record_count_named(COLLIDE, &[], 7, tags_of("a"), counted, 1);
+        map.record_gauge_named(COLLIDE, &[], 7, tags_of("a"), counted, 1.0);
+        map.record_histogram_named(COLLIDE, &[], 7, tags_of("a"), counted, 1.0);
+        assert_eq!(calls.get(), 3, "a hit is compared once");
+        assert_eq!(map.tag_hash_collisions(), 0);
+    }
+
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn series_key_stays_56_bytes() {
