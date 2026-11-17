@@ -15,6 +15,12 @@ pub const DEFAULT_BUCKET_BOUNDARIES: &[f64] = &[
 /// On each flush, renders all metrics into the Prometheus exposition text
 /// format and stores the result for retrieval via [`Self::get_metrics_text`].
 ///
+/// Counters are per-flush deltas, not cumulative totals. A series is absent
+/// from the text when it was not recorded in the last interval (gauges
+/// persist). `# HELP` and `# TYPE` lines repeat for every series. The output is
+/// therefore not suitable for direct Prometheus scraping of counters or
+/// multi-series metrics.
+///
 /// This exporter does not serve HTTP — it is the caller's responsibility
 /// to integrate the rendered text into an HTTP endpoint (e.g., via axum,
 /// actix-web, or hyper).
@@ -100,6 +106,7 @@ impl PrometheusExporter {
 
     fn render(&self, metrics: &[FlushedMetric]) -> String {
         let mut out = String::with_capacity(4096);
+        let mut boundary_fractions: Vec<f64> = Vec::new();
 
         for metric in metrics {
             let name = self.full_name(metric.namespace, metric.metric_name);
@@ -123,11 +130,20 @@ impl PrometheusExporter {
                     let count = sketch.count();
                     let sum = sketch.sum();
 
+                    // One walk over the sketch for every boundary
+                    boundary_fractions.clear();
+                    boundary_fractions.resize(self.bucket_boundaries.len(), 0.0);
+                    sketch.estimate_quantiles_at_values(
+                        &self.bucket_boundaries,
+                        &mut boundary_fractions,
+                    );
+
                     // Emit _bucket lines for each boundary
                     let mut cumulative = 0u64;
-                    for &le in &self.bucket_boundaries {
-                        // Estimate how many values are <= le
-                        let quantile_at = sketch.estimate_quantile_at_value(le);
+                    for (&le, &quantile_at) in
+                        self.bucket_boundaries.iter().zip(&boundary_fractions)
+                    {
+                        // Estimated fraction of values <= le
                         let bucket_count = (quantile_at * count as f64).round() as u64;
                         cumulative = cumulative.max(bucket_count);
 
