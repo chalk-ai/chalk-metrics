@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/chalk-ai/chalk-metrics/compare/v0.0.4...v0.0.5) - 2026-11-17
+
+### Fixed
+
+- deliver StatsD output in smaller bursts and count what is dropped ([#17](https://github.com/chalk-ai/chalk-metrics/pull/17))
+
+### Other
+
+- add goalpost benchmarks and an allocation-budget test ([#14](https://github.com/chalk-ai/chalk-metrics/pull/14))
+
 ## [0.0.4](https://github.com/chalk-ai/chalk-metrics/compare/v0.0.0...v0.0.4) - 2026-11-14
 
 ### Security
