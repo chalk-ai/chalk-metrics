@@ -151,8 +151,10 @@ pub trait Exporter: Send + Sync {
     /// since the last flush. Errors are logged but do not halt the flush loop.
     async fn export(&self, metrics: &[FlushedMetric]) -> Result<(), ExportError>;
 
-    /// Export original observations when this exporter requests raw samples,
-    /// on the independent raw-sample flush interval (default: 100 milliseconds).
+    /// Export original observations when this exporter requests raw samples.
+    /// Called once per raw-sample flush interval (default: 100 milliseconds)
+    /// since the previous call, or sooner once the raw queue is a quarter full,
+    /// so batch sizes and call frequency vary with load.
     ///
     /// Default is a no-op; only exporters that support per-event distribution
     /// fidelity (e.g. StatsD) need to override this.
