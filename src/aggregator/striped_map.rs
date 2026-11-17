@@ -22,6 +22,8 @@ pub struct TagsData {
     pub pairs: Vec<(&'static str, std::borrow::Cow<'static, str>)>,
 }
 
+type TagPairs = [(&'static str, std::borrow::Cow<'static, str>)];
+
 /// Key stored in the aggregation map.
 #[derive(Debug)]
 struct AggKey {
@@ -54,7 +56,7 @@ const MAX_COLLIDING_SERIES: u32 = 8;
 // Hashes choose buckets; equality includes the metric's namespace and kind.
 // tags_hash is the fingerprint supplied by the generated recording API, and
 // probe separates tag sets that share it (0 for the first).
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SeriesKey {
     fingerprint: u64,
     namespace: &'static [&'static str],
@@ -293,52 +295,83 @@ impl StripedAggMap {
     /// Finds the series for `key` (probe 0) and runs `record` on it, creating
     /// it with `new_slot` and `make_tags` if it does not exist. Series are
     /// identified by a 64-bit tag hash; when the stored tags are not the
-    /// caller's (`tags_match` is false) that is a hash collision, and the
-    /// recording moves on to the next probe, so different tag sets stay
-    /// separate series. After `MAX_COLLIDING_SERIES` probes it joins the last.
-    /// The first probe is the usual one: one `entry` lookup, one `tags_match`.
+    /// caller's (`tags_match` is false) that is a hash collision, handled by
+    /// `probe_colliding`, so different tag sets stay separate series. The usual
+    /// case is one `entry` lookup and one `tags_match`, with no loop here: this
+    /// function is instantiated once per generated metric.
     #[inline]
     fn with_series<R>(
         &self,
         map: &mut HashMap<SeriesKey, (AggKey, AggSlot)>,
-        mut key: SeriesKey,
+        key: SeriesKey,
         make_tags: impl FnOnce() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
         tags_match: impl Fn(&[(&'static str, std::borrow::Cow<'static, str>)]) -> bool,
         new_slot: impl FnOnce() -> AggSlot,
         record: impl FnOnce(&AggKey, &AggSlot) -> R,
     ) -> R {
-        let (namespace, metric_name) = (key.namespace, key.metric_name);
-        loop {
+        match map.entry(key) {
+            hashbrown::hash_map::Entry::Occupied(e) => {
+                let (series_key, slot) = e.get();
+                if tags_match(&series_key.tags_data.pairs) {
+                    return record(series_key, slot);
+                }
+            }
+            hashbrown::hash_map::Entry::Vacant(e) => {
+                let (series_key, slot) = e.insert((
+                    AggKey {
+                        namespace: key.namespace,
+                        metric_name: key.metric_name,
+                        tags_data: Arc::new(TagsData { pairs: make_tags() }),
+                    },
+                    new_slot(),
+                ));
+                return record(series_key, slot);
+            }
+        }
+        let (mut make_tags, mut new_slot, mut record) =
+            (Some(make_tags), Some(new_slot), Some(record));
+        let mut out = None;
+        self.probe_colliding(
+            map,
+            key,
+            &tags_match,
+            &mut || (make_tags.take().unwrap())(),
+            &mut || (new_slot.take().unwrap())(),
+            &mut |series_key, slot| out = Some((record.take().unwrap())(series_key, slot)),
+        );
+        out.unwrap()
+    }
+
+    /// Probe 0 holds a different tag set: use the next probe that holds this
+    /// one or is free. If all `MAX_COLLIDING_SERIES` probes hold other tag sets,
+    /// join the last. Not generic and out of line, so the loop is compiled once.
+    #[cold]
+    #[inline(never)]
+    fn probe_colliding(
+        &self,
+        map: &mut HashMap<SeriesKey, (AggKey, AggSlot)>,
+        mut key: SeriesKey,
+        tags_match: &dyn Fn(&TagPairs) -> bool,
+        make_tags: &mut dyn FnMut() -> Vec<(&'static str, std::borrow::Cow<'static, str>)>,
+        new_slot: &mut dyn FnMut() -> AggSlot,
+        record: &mut dyn FnMut(&AggKey, &AggSlot),
+    ) {
+        self.tag_hash_collisions.fetch_add(1, Ordering::Relaxed);
+        for probe in 1..MAX_COLLIDING_SERIES {
+            key.probe = probe;
             match map.entry(key) {
                 hashbrown::hash_map::Entry::Occupied(e) => {
                     let (series_key, slot) = e.get();
-                    let probe = e.key().probe;
                     if probe + 1 == MAX_COLLIDING_SERIES || tags_match(&series_key.tags_data.pairs)
                     {
-                        if probe > 0 {
-                            self.tag_hash_collisions.fetch_add(1, Ordering::Relaxed);
-                        }
                         return record(series_key, slot);
                     }
-                    let next = SeriesKey {
-                        fingerprint: e.key().fingerprint,
-                        namespace,
-                        metric_name,
-                        tags_hash: e.key().tags_hash,
-                        kind: e.key().kind,
-                        probe: probe + 1,
-                    };
-                    key = next;
                 }
                 hashbrown::hash_map::Entry::Vacant(e) => {
-                    let probe = e.key().probe;
-                    if probe > 0 {
-                        self.tag_hash_collisions.fetch_add(1, Ordering::Relaxed);
-                    }
                     let (series_key, slot) = e.insert((
                         AggKey {
-                            namespace,
-                            metric_name,
+                            namespace: key.namespace,
+                            metric_name: key.metric_name,
                             tags_data: Arc::new(TagsData { pairs: make_tags() }),
                         },
                         new_slot(),

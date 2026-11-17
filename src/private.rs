@@ -15,11 +15,19 @@ pub fn tags_match(
             continue;
         };
         match stored.next() {
-            Some((stored_key, stored_value)) if stored_key == key && stored_value == value => {}
+            Some((stored_key, stored_value))
+                if same_str(stored_key, key) && same_str(stored_value, value) => {}
             _ => return false,
         }
     }
     stored.next().is_none()
+}
+
+/// Equal strings, checking for the very same static first so the common hit
+/// compares two pointers and lengths instead of the bytes. Deliberately not
+/// `#[inline]`: inlining it into every generated metric slows compilation.
+fn same_str(a: &str, b: &str) -> bool {
+    (a.len() == b.len() && std::ptr::eq(a.as_ptr(), b.as_ptr())) || a == b
 }
 
 /// A content-based name fingerprint computed at compile time by generated metrics.
@@ -78,5 +86,29 @@ impl MetricNamespace for NoNamespace {
     #[inline]
     fn path() -> &'static [&'static str] {
         &[]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn same_str_falls_back_to_content() {
+        let owned = String::from("value");
+        assert!(same_str("value", "value"));
+        assert!(same_str(&owned, "value"));
+        assert_ne!(owned.as_ptr(), "value".as_ptr());
+        assert!(!same_str("value", "other"));
+        assert!(!same_str("value", "valu"));
+        assert!(same_str("", ""));
+    }
+
+    #[test]
+    fn tags_match_compares_content_at_different_addresses() {
+        let owned = String::from("eu");
+        let stored: Vec<(&'static str, Cow<'static, str>)> = vec![("region", Cow::Owned(owned))];
+        assert!(tags_match(&stored, &[("region", Some("eu"))]));
+        assert!(!tags_match(&stored, &[("region", Some("us"))]));
     }
 }
