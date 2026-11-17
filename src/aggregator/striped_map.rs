@@ -484,7 +484,9 @@ impl StripedAggMap {
                             value: FlushedValue::Gauge(value),
                         });
                     }
-                    true
+                    // Records hold this stripe lock too, so removing the slot
+                    // cannot discard a write made after this flush.
+                    false
                 }
                 AggSlot::Histogram(hist_slot) => {
                     let sketch = hist_slot.flush();
@@ -558,7 +560,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(map.flush().len(), if kind == 1 { 512 } else { 0 });
+        assert!(map.flush().is_empty());
         for series in 0..512 {
             record_growth(&map, kind, series, 7.0);
         }
@@ -868,11 +870,55 @@ mod tests {
     }
 
     #[test]
-    fn test_flush_retains_gauge_entries() {
+    fn cha_12486_gauge_is_emitted_only_after_a_new_record() {
         let map = make_map();
-        map.record_gauge("g", &[], 100, Vec::new, 42.0);
-        assert_eq!(map.flush().len(), 1);
-        assert_eq!(map.flush().len(), 1);
+        map.record_gauge(
+            "served_staleness_seconds",
+            &["bloom_filters"],
+            100,
+            Vec::new,
+            49336.0,
+        );
+        let first = map.flush();
+        assert_eq!(first.len(), 1);
+        assert!(matches!(first[0].value, FlushedValue::Gauge(49336.0)));
+        assert!(map.flush().is_empty(), "a stopped gauge must not look live");
+        assert!(map.flush().is_empty());
+
+        map.record_gauge(
+            "served_staleness_seconds",
+            &["bloom_filters"],
+            100,
+            Vec::new,
+            90.0,
+        );
+        let updated = map.flush();
+        assert_eq!(updated.len(), 1);
+        assert!(matches!(updated[0].value, FlushedValue::Gauge(90.0)));
+        assert!(map.flush().is_empty());
+    }
+
+    #[test]
+    fn cha_12486_one_shot_gauge_tags_do_not_accumulate() {
+        let map = make_map();
+        for epoch in 0..4 {
+            for series in 0..128 {
+                let id = epoch * 128 + series;
+                map.record_gauge(
+                    "served_staleness_seconds",
+                    &["bloom_filters"],
+                    id,
+                    || vec![("feature_namespace", format!("once_{id}").into())],
+                    49336.0,
+                );
+            }
+            assert_eq!(map.flush().len(), 128, "export only this interval's writes");
+            assert!(map.flush().is_empty());
+            assert!(
+                map.stripes.iter().all(|stripe| stripe.lock().is_empty()),
+                "idle gauge entries must be reclaimed as tag values churn"
+            );
+        }
     }
 
     #[test]

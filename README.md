@@ -400,7 +400,10 @@ chalk_metrics::client::builder()
 ### Flush latency, overflow, and shutdown
 
 Counters, gauges, and sketches are exported on `flush_interval` (default 10
-seconds). Original observations use a separate `raw_sample_flush_interval`
+seconds). A gauge exports the latest value recorded since the previous flush;
+without a new record, it stops exporting and its cached series is removed.
+Record gauges each interval while their values remain current.
+Original observations use a separate `raw_sample_flush_interval`
 (default 100 milliseconds, must be positive). Raw observations are exported
 one raw flush interval after the previous export, or sooner once the queue is a
 quarter full (checked ten times per interval, but no more often than once per

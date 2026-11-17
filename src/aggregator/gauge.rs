@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// A lock-free gauge that stores the last recorded f64 value.
 ///
 /// Stores the f64 as a bit pattern in an `AtomicU64` for lock-free
-/// last-writer-wins semantics. On flush, the value persists (gauges
-/// represent current state, not deltas).
+/// last-writer-wins semantics. A flush consumes the latest value, so an idle
+/// gauge is not emitted again without a new record.
 pub struct GaugeSlot {
     bits: AtomicU64,
 }
@@ -26,11 +26,11 @@ impl GaugeSlot {
         self.bits.store(value.to_bits(), Ordering::Relaxed);
     }
 
-    /// Read the current gauge value. Returns `None` if no value has been
-    /// recorded. The value is **not** reset — gauges persist across flushes.
+    /// Take the latest gauge value. Returns `None` if no value has been
+    /// recorded since the previous flush.
     #[inline]
     pub fn flush(&self) -> Option<f64> {
-        let bits = self.bits.load(Ordering::Relaxed);
+        let bits = self.bits.swap(UNSET, Ordering::Relaxed);
         if bits == UNSET {
             None
         } else {
@@ -38,7 +38,7 @@ impl GaugeSlot {
         }
     }
 
-    /// Returns `true` if a value has been recorded.
+    /// Returns `true` if a value has been recorded since the previous flush.
     #[allow(dead_code)]
     pub fn has_value(&self) -> bool {
         self.bits.load(Ordering::Relaxed) != UNSET
@@ -72,11 +72,16 @@ mod tests {
     }
 
     #[test]
-    fn test_flush_does_not_reset() {
+    fn test_flush_consumes_value_until_recorded_again() {
         let slot = GaugeSlot::new();
         slot.record(10.0);
         assert_eq!(slot.flush(), Some(10.0));
-        assert_eq!(slot.flush(), Some(10.0)); // persists
+        assert_eq!(slot.flush(), None);
+        assert!(!slot.has_value());
+        slot.record(20.0);
+        assert!(slot.has_value());
+        assert_eq!(slot.flush(), Some(20.0));
+        assert_eq!(slot.flush(), None);
     }
 
     #[test]

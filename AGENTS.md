@@ -46,7 +46,7 @@ Guidance for coding agents working in this repository.
 - Hashes metric name contents; compares namespace, name, kind, and actual tag pairs on hash matches
 - Generated recording compares borrowed tags on hits; low-level closure APIs materialize tags on every call
 - `src/aggregator/count.rs` — lock-free `AtomicI64` (swap-to-zero on flush)
-- `src/aggregator/gauge.rs` — lock-free `AtomicU64` storing f64 as bits (persists across flushes)
+- `src/aggregator/gauge.rs` — lock-free `AtomicU64` storing f64 as bits (consumed on flush)
 - `src/aggregator/sketch.rs` — UDD Sketch for approximate quantiles (from Timescale, Apache 2.0)
 - `src/aggregator/histogram.rs` — `parking_lot::Mutex<UDDSketch>` (clone-and-reset on flush)
 
@@ -65,6 +65,6 @@ Guidance for coding agents working in this repository.
 - Aliased tags use the alias identifier as both the struct field name and export key for that metric
 
 ### Flush Behavior
-- Counts and histograms are drained from the map on flush
-- Gauges persist across flushes
+- Counts, gauges, and histograms are drained from the map on flush
+- Gauges export the latest value recorded since the previous flush
 - Tags data is `Arc`-shared — flush does a cheap pointer bump, no string copies
