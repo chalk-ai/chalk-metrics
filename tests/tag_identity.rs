@@ -9,6 +9,10 @@ use chalk_metrics::export::{
 };
 use chalk_metrics::{client, define_metrics};
 
+#[cfg_attr(
+    feature = "python-bindings",
+    pyo3::pyclass(frozen, eq, hash, from_py_object)
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CollidingTag(String);
 
